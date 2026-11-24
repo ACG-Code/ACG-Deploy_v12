@@ -20,6 +20,7 @@
 #     2026.11.24 (ACGI) - Missing connection values = critical error; group exists only on HTTP 200
 #     2026.11.24 (ACGI) - Async rule/group calls; }PickList_Deployment Environments removed
 #     2026.11.24 (ACGI) - Owner kept (informational): enterable on All Items and on each item
+#     2026.11.24 (ACGI) - REST self-check: wrong connection values = critical error
 #EndRegion
 
 #Region --------------- Constants ---------------
@@ -70,6 +71,16 @@ ELSE;
 	IF(sMissing @<> '');
 		nError = 1;
 		sMessage = 'connection values missing:' | sMissing | ' - run }Sys.Deploy.Setup with pThisDB, pBaseURL, pTenantID and pApiKey, then run this process again';
+	ENDIF;
+ENDIF;
+
+# the values are set - check they actually reach this database
+IF(nError = 0);
+	ExecuteProcess('}Sys.API.Request', 'pDB', '', 'pMethod', 'GET', 'pPath', '/Cubes(''Deployment'')?$select=Name');
+	IF(gHttpCode <> 200);
+		nError = 1;
+		sMessage = 'cannot reach this database over REST (HTTP ' | NumberToString(gHttpCode) | ') - check Database Name ''' | CellGetS(cAdm, 'Database Name', 'String')
+			| ''', Base URL, Tenant ID and API Key; correct them with }Sys.Deploy.Setup, then run this process again';
 	ENDIF;
 ENDIF;
 
