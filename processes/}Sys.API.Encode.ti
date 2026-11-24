@@ -1,0 +1,68 @@
+#region Prolog
+#****************************************************************
+# Sys.API.Encode
+# Returns StringGlobalVariable('gEnc'):
+#   key   : for ...('<here>') in a URL   - ' doubled, URL-unsafe chars %-encoded
+#   json  : for "<here>" in a JSON body  - " \ and control chars escaped
+#   bind  : for "Dimensions('<here>')" inside JSON - ' doubled + JSON escaped
+#   quote : ' doubled only (text that is already JSON-escaped)
+#****************************************************************
+StringGlobalVariable('gEnc');
+sOut = '';
+k = 1;
+WHILE(k <= Long(pText));
+  c = Subst(pText, k, 1);
+  IF(pMode @= 'key');
+    IF(c @= '''');
+      sOut = sOut | '''''';
+    ELSEIF(c @= ' ');
+      sOut = sOut | '%20';
+    ELSEIF(c @= '%');
+      sOut = sOut | '%25';
+    ELSEIF(c @= '#');
+      sOut = sOut | '%23';
+    ELSEIF(c @= '&');
+      sOut = sOut | '%26';
+    ELSEIF(c @= '?');
+      sOut = sOut | '%3F';
+    ELSEIF(c @= '+');
+      sOut = sOut | '%2B';
+    ELSEIF(c @= '/');
+      sOut = sOut | '%2F';
+    ELSEIF(c @= '}');
+      sOut = sOut | '%7D';
+    ELSEIF(c @= '{');
+      sOut = sOut | '%7B';
+    ELSEIF(c @= '"');
+      sOut = sOut | '%22';
+    ELSE;
+      sOut = sOut | c;
+    ENDIF;
+  ELSEIF(pMode @= 'quote');
+    IF(c @= '''');
+      sOut = sOut | '''''';
+    ELSE;
+      sOut = sOut | c;
+    ENDIF;
+  ELSE;
+    IF(c @= '''' & pMode @= 'bind');
+      sOut = sOut | '''''';
+    ELSEIF(c @= '"');
+      sOut = sOut | '\"';
+    ELSEIF(c @= '\');
+      sOut = sOut | '\\';
+    ELSEIF(c @= Char(10));
+      sOut = sOut | '\n';
+    ELSEIF(c @= Char(13));
+      sOut = sOut | '\r';
+    ELSEIF(c @= Char(9));
+      sOut = sOut | '\t';
+    ELSE;
+      sOut = sOut | c;
+    ENDIF;
+  ENDIF;
+  k = k + 1;
+END;
+gEnc = sOut;
+
+#endregion

@@ -1,0 +1,52 @@
+{
+	"@type":"Process",
+	"Name":"}Sys.Deploy.Setup",
+	"HasSecurityAccess":false,
+	"Code@Code.link":"}Sys.Deploy.Setup.ti",
+	"DataSource":
+	{
+		"Type":"None"
+	},
+	"Parameters":
+	[
+		{
+			"Name":"pSourceDB",
+			"Prompt":"Database name for the Source environment (blank = this database)",
+			"Value":"",
+			"Type":"String"
+		},
+		{
+			"Name":"pTarget1DB",
+			"Prompt":"Database name for Target1 (optional)",
+			"Value":"",
+			"Type":"String"
+		},
+		{
+			"Name":"pThisDB",
+			"Prompt":"This database's name, e.g. GitDemo_Dev (blank = keep current value)",
+			"Value":"",
+			"Type":"String"
+		},
+		{
+			"Name":"pBaseURL",
+			"Prompt":"This tenant's base URL, e.g. https://us-east-1.planninganalytics.saas.ibm.com (blank = keep)",
+			"Value":"",
+			"Type":"String"
+		},
+		{
+			"Name":"pTenantID",
+			"Prompt":"This tenant's ID (blank = keep)",
+			"Value":"",
+			"Type":"String"
+		},
+		{
+			"Name":"pApiKey",
+			"Prompt":"API key for this tenant (blank = keep). Never logged.",
+			"Value":"",
+			"Type":"String"
+		}
+	],
+	"Variables":[],
+	"UIData": "CubeAction=1511\fDataAction=1503\fCubeLogChanges=0\f",
+	"VariablesUIData": []
+}

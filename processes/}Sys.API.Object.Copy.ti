@@ -1,0 +1,201 @@
+#region Prolog
+#Region ############################################# HEADER #############################################
+# Process: }Sys.API.Object.Copy
+# Purpose: Copy a process, a cube's rules or a chore from this database to the pTargetDB
+#          environment (create if missing, otherwise update).
+#            Process: full definition, then compiled on the target (compile errors fail it)
+#            Rule   : cube rules; skipped if the source cube has none. TM1 saves rules even
+#                     with errors, so the target is checked with tm1.CheckRules
+#            Chore  : schedule + tasks; replaced on the target (deactivate, delete, create
+#                     inactive, activate if active on source). Its processes must exist there.
+#          Returns NumericGlobalVariable('gDeployOK') and StringGlobalVariable('gDeployMsg').
+# Date Created: 2026.11.24 (ACGI)
+# Last Update: 2026.11.24
+# Notes:
+#     2026.11.24 (ACGI) - Initial Process Creation
+#     2026.11.24 (ACGI) - Process Example standard + PLOG logging
+#     2026.11.24 (ACGI) - Process Log status (T08): ERROR only for critical errors
+#EndRegion
+
+#Region --------------- Constants ---------------
+cLogProc = 'PLOG';
+cProc = GetProcessName;
+cUser = NumberToString(DIMIX('}Clients', TM1USER));
+cTimestamp = TIMST(now, '\Y\m\d\h\i\s');
+cRandomInt = NumberToString(INT(RAND() * 1005));
+cView = '%cProc%.%cUser%.%cTimestamp%.%cRandomInt%';
+cTemp = 1;
+cProcSelect = '?$select=Name,HasSecurityAccess,PrologProcedure,MetadataProcedure,DataProcedure,EpilogProcedure,DataSource,Parameters,Variables,VariablesUIData,UIData';
+cChoreSelect = '?$select=Name,StartTime,DSTSensitive,Active,ExecutionMode,Frequency&$expand=Tasks($select=Parameters;$expand=Process($select=Name))';
+NumericGlobalVariable('gHttpCode');
+StringGlobalVariable('gHttpBody');
+StringGlobalVariable('gEnc');
+NumericGlobalVariable('gDeployOK');
+StringGlobalVariable('gDeployMsg');
+#EndRegion
+
+#Region --------------- Initialize Logging ---------------
+ExecuteProcess(cLogProc, 'pFlag', 'INIT', 'pProc', cProc);
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pType=' | pType, 'pLine', 'P01');
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pName=' | pName, 'pLine', 'P02');
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pTargetDB=' | pTargetDB, 'pLine', 'P03');
+#EndRegion
+
+#Region --------------- Error Handling ---------------
+nError = 0;
+nCritical = 0;
+sMessage = '';
+sResult = '';
+
+IF(pType @<> 'Process' & pType @<> 'Rule' & pType @<> 'Chore');
+	nError = 1;
+	sMessage = 'pType: "' | pType | '" is invalid (Process, Rule or Chore)';
+ELSEIF(pName @= '' % pTargetDB @= '');
+	nError = 1;
+	sMessage = 'pName and pTargetDB are required';
+ENDIF;
+
+IF(nError = 1);
+	ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', sMessage);
+	ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Critical errors, exiting');
+	nCritical = 1;
+	ProcessBreak;
+ENDIF;
+#EndRegion
+
+#Region --------------- Variables ---------------
+ExecuteProcess('}Sys.API.Encode', 'pText', pName, 'pMode', 'key');
+sKey = gEnc;
+#EndRegion
+
+#Region --------------- Process ---------------
+IF(pType @= 'Process');
+	sPath = '/Processes(''' | sKey | ''')';
+	ExecuteProcess('}Sys.API.Request', 'pDB', '', 'pMethod', 'GET', 'pPath', sPath | cProcSelect);
+	IF(gHttpCode <> 200);
+		nError = 1;
+		sMessage = 'process not found on source (HTTP ' | NumberToString(gHttpCode) | ')';
+	ELSE;
+		sBody = gHttpBody;
+		ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Source definition ' | NumberToString(LONG(sBody)) | ' chars');
+		ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'GET', 'pPath', sPath | '?$select=Name');
+		IF(gHttpCode = 200);
+			ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'PATCH', 'pPath', sPath, 'pBody', sBody);
+			sAction = 'updated';
+		ELSE;
+			ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'POST', 'pPath', '/Processes', 'pBody', sBody);
+			sAction = 'created';
+		ENDIF;
+		IF(gHttpCode < 200 % gHttpCode > 299);
+			nError = 1;
+			sMessage = 'process ' | sAction | ' failed (HTTP ' | NumberToString(gHttpCode) | '): ' | gHttpBody;
+		ELSE;
+			sResult = 'process ' | sAction;
+			ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'POST', 'pPath', sPath | '/tm1.Compile', 'pBody', '{}');
+			IF(SCAN('"LineNumber"', gHttpBody) > 0);
+				nError = 1;
+				sMessage = 'process ' | sAction | ' but does not compile on target: ' | gHttpBody;
+			ENDIF;
+		ENDIF;
+	ENDIF;
+ENDIF;
+#EndRegion
+
+#Region --------------- Rule ---------------
+IF(pType @= 'Rule');
+	sPath = '/Cubes(''' | sKey | ''')';
+	ExecuteProcess('}Sys.API.Request', 'pDB', '', 'pMethod', 'GET', 'pPath', sPath | '?$select=Rules');
+	IF(gHttpCode <> 200);
+		nError = 1;
+		sMessage = 'cube not found on source (HTTP ' | NumberToString(gHttpCode) | ')';
+	ELSEIF(SCAN('"Rules":null', gHttpBody) > 0 % SCAN('"Rules":""', gHttpBody) > 0);
+		sResult = 'no rules on source - skipped';
+	ELSE;
+		sBody = gHttpBody;
+		ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'PATCH', 'pPath', sPath, 'pBody', sBody);
+		IF(gHttpCode = 404);
+			nError = 1;
+			sMessage = 'cube does not exist on target';
+		ELSEIF(gHttpCode < 200 % gHttpCode > 299);
+			nError = 1;
+			sMessage = 'rules failed (HTTP ' | NumberToString(gHttpCode) | '): ' | gHttpBody;
+		ELSE;
+			sResult = 'rules updated';
+			ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'POST', 'pPath', sPath | '/tm1.CheckRules', 'pBody', '{}');
+			IF(SCAN('"LineNumber"', gHttpBody) > 0);
+				nError = 1;
+				sMessage = 'rules saved but have errors on target: ' | gHttpBody;
+			ENDIF;
+		ENDIF;
+	ENDIF;
+ENDIF;
+#EndRegion
+
+#Region --------------- Chore ---------------
+IF(pType @= 'Chore');
+	sPath = '/Chores(''' | sKey | ''')';
+	ExecuteProcess('}Sys.API.Request', 'pDB', '', 'pMethod', 'GET', 'pPath', sPath | cChoreSelect);
+	IF(gHttpCode <> 200);
+		nError = 1;
+		sMessage = 'chore not found on source (HTTP ' | NumberToString(gHttpCode) | ')';
+	ELSE;
+		sIn = gHttpBody;
+		nActive = IF(SCAN('"Active":true', sIn) > 0, 1, 0);
+		# create inactive
+		nPos = SCAN('"Active":true', sIn);
+		IF(nPos > 0);
+			sIn = SUBST(sIn, 1, nPos - 1) | '"Active":false' | SUBST(sIn, nPos + 13, LONG(sIn) - nPos - 12);
+		ENDIF;
+		# "Process":{"Name":"X"}  ->  "Process@odata.bind":"Processes('X')"
+		sOut = '';
+		nPos = SCAN('"Process":{"Name":"', sIn);
+		WHILE(nPos > 0);
+			sOut = sOut | SUBST(sIn, 1, nPos - 1);
+			sIn = SUBST(sIn, nPos + 19, LONG(sIn) - nPos - 18);
+			nEnd = SCAN('"}', sIn);
+			sPName = SUBST(sIn, 1, nEnd - 1);
+			sIn = SUBST(sIn, nEnd + 2, LONG(sIn) - nEnd - 1);
+			ExecuteProcess('}Sys.API.Encode', 'pText', sPName, 'pMode', 'quote');
+			sOut = sOut | '"Process@odata.bind":"Processes(''' | gEnc | ''')"';
+			nPos = SCAN('"Process":{"Name":"', sIn);
+		END;
+		sBody = sOut | sIn;
+
+		ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'GET', 'pPath', sPath | '?$select=Name');
+		IF(gHttpCode = 200);
+			ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'POST', 'pPath', sPath | '/tm1.Deactivate', 'pBody', '{}');
+			ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'DELETE', 'pPath', sPath);
+			ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Existing chore deleted on target HTTP ' | NumberToString(gHttpCode));
+		ENDIF;
+		ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'POST', 'pPath', '/Chores', 'pBody', sBody);
+		IF(gHttpCode < 200 % gHttpCode > 299);
+			nError = 1;
+			sMessage = 'chore create failed (HTTP ' | NumberToString(gHttpCode) | '): ' | gHttpBody;
+		ELSE;
+			sResult = 'chore copied (inactive)';
+			IF(nActive = 1);
+				ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'POST', 'pPath', sPath | '/tm1.Activate', 'pBody', '{}');
+				IF(gHttpCode >= 200 & gHttpCode <= 299);
+					sResult = 'chore copied and activated';
+				ELSE;
+					nError = 1;
+					sMessage = 'chore copied but activate failed (HTTP ' | NumberToString(gHttpCode) | '): ' | gHttpBody;
+				ENDIF;
+			ENDIF;
+		ENDIF;
+	ENDIF;
+ENDIF;
+#EndRegion
+
+#endregion
+#region Epilog
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Beginning Epilog');
+
+gDeployOK = IF(nError = 1, 0, 1);
+gDeployMsg = IF(nError = 1, sMessage, sResult);
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', gDeployMsg);
+
+sStatus = IF(nCritical = 1, 'ERROR', 'SUCCESS');
+ExecuteProcess(cLogProc, 'pFlag', 'END', 'pProc', cProc, 'pMSG', sStatus);
+
+#endregion

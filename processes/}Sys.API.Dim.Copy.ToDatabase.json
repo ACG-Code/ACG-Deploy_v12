@@ -1,0 +1,52 @@
+{
+	"@type":"Process",
+	"Name":"}Sys.API.Dim.Copy.ToDatabase",
+	"HasSecurityAccess":false,
+	"Code@Code.link":"}Sys.API.Dim.Copy.ToDatabase.ti",
+	"DataSource":
+	{
+		"Type":"None"
+	},
+	"Parameters":
+	[
+		{
+			"Name":"pDim",
+			"Prompt":"Dimension to copy (from this database)",
+			"Value":"",
+			"Type":"String"
+		},
+		{
+			"Name":"pTargetDB",
+			"Prompt":"Target database name (same PA SaaS tenant)",
+			"Value":"",
+			"Type":"String"
+		},
+		{
+			"Name":"pAttrValues",
+			"Prompt":"1 = copy attribute values",
+			"Value":0,
+			"Type":"Numeric"
+		},
+		{
+			"Name":"pAttrRules",
+			"Prompt":"1 = copy }ElementAttributes rules",
+			"Value":0,
+			"Type":"Numeric"
+		},
+		{
+			"Name":"pSubsets",
+			"Prompt":"1 = copy every public subset (all hierarchies)",
+			"Value":0,
+			"Type":"Numeric"
+		},
+		{
+			"Name":"pSecurity",
+			"Prompt":"1 = copy element security",
+			"Value":0,
+			"Type":"Numeric"
+		}
+	],
+	"Variables":[],
+	"UIData": "CubeAction=1511\fDataAction=1503\fCubeLogChanges=0\f",
+	"VariablesUIData": []
+}

@@ -1,0 +1,130 @@
+#region Prolog
+#Region ############################################# HEADER #############################################
+# Process: }Sys.API.Dim.Security.Copy   (SecurityCube: Yes)
+# Purpose: Copy element security (}ElementSecurity_<pDim>) to the pTargetDB environment:
+#            1. create the security cube on the target if missing
+#            2. clear it and copy every assignment (}Sys.API.Cube.Data.Push)
+#            3. run SecurityRefresh on the target
+#          Groups must already exist on the target - assignments for a missing group make
+#          the copy fail and are reported. Admin groups never hold element security.
+#          Returns NumericGlobalVariable('gDeployOK') and StringGlobalVariable('gDeployMsg').
+# Date Created: 2026.11.24 (ACGI)
+# Last Update: 2026.11.24
+# Notes:
+#     2026.11.24 (ACGI) - Initial Process Creation
+#     2026.11.24 (ACGI) - Process Example standard + PLOG logging; Data.Push checked via gDeployOK
+#     2026.11.24 (ACGI) - Process Log status (T08): ERROR only for critical errors
+#EndRegion
+
+#Region --------------- Constants ---------------
+cLogProc = 'PLOG';
+cProc = GetProcessName;
+cUser = NumberToString(DIMIX('}Clients', TM1USER));
+cTimestamp = TIMST(now, '\Y\m\d\h\i\s');
+cRandomInt = NumberToString(INT(RAND() * 1005));
+cView = '%cProc%.%cUser%.%cTimestamp%.%cRandomInt%';
+cTemp = 1;
+NumericGlobalVariable('gHttpCode');
+StringGlobalVariable('gHttpBody');
+StringGlobalVariable('gEnc');
+StringGlobalVariable('gTIStatus');
+NumericGlobalVariable('gDeployOK');
+StringGlobalVariable('gDeployMsg');
+#EndRegion
+
+#Region --------------- Initialize Logging ---------------
+ExecuteProcess(cLogProc, 'pFlag', 'INIT', 'pProc', cProc);
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pDim=' | pDim, 'pLine', 'P01');
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pTargetDB=' | pTargetDB, 'pLine', 'P02');
+#EndRegion
+
+#Region --------------- Error Handling ---------------
+nError = 0;
+nCritical = 0;
+sMessage = '';
+sResult = '';
+
+IF(pDim @= '' % DimensionExists(pDim) = 0);
+	nError = 1;
+	sMessage = 'pDim: "' | pDim | '" not found';
+ELSEIF(pTargetDB @= '');
+	nError = 1;
+	sMessage = 'pTargetDB is required';
+ENDIF;
+
+IF(nError = 1);
+	ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', sMessage);
+	ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Critical errors, exiting');
+	nCritical = 1;
+	ProcessBreak;
+ENDIF;
+#EndRegion
+
+#Region --------------- Variables ---------------
+sCube = '}ElementSecurity_' | pDim;
+IF(CubeExists(sCube) = 0);
+	sResult = 'no element security on source - skipped';
+	ProcessBreak;
+ENDIF;
+
+ExecuteProcess('}Sys.API.Encode', 'pText', sCube, 'pMode', 'key');
+sCubePath = '/Cubes(''' | gEnc | ''')';
+
+# TI-literal forms for the target-side code
+sDimTI = '';
+nC = 1;
+WHILE(nC <= LONG(pDim));
+	sC = SUBST(pDim, nC, 1);
+	sDimTI = sDimTI | IF(sC @= '''', '''''', sC);
+	nC = nC + 1;
+END;
+sCubeTI = '}ElementSecurity_' | sDimTI;
+#EndRegion
+
+#Region --------------- 1. Security cube on target ---------------
+ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'GET', 'pPath', sCubePath | '?$select=Name');
+IF(gHttpCode = 404);
+	ExecuteProcess('}Sys.API.Exec.TI', 'pDB', pTargetDB,
+		'pCode', 'IF(CubeExists(''' | sCubeTI | ''') = 0); CubeCreate(''' | sCubeTI | ''', ''' | sDimTI | ''', ''}Groups''); ENDIF;');
+	ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Create security cube on target: ' | gTIStatus);
+	IF(gTIStatus @<> 'CompletedSuccessfully');
+		nError = 1;
+		sMessage = 'could not create ' | sCube | ' on target: ' | gHttpBody;
+		ProcessBreak;
+	ENDIF;
+ENDIF;
+#EndRegion
+
+#Region --------------- 2. Copy assignments (full replace) ---------------
+ExecuteProcess('}Sys.API.Cube.Data.Push', 'pCube', sCube, 'pTargetDB', pTargetDB, 'pAllElements', 1, 'pClear', 1);
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Data.Push: ' | gDeployMsg);
+IF(gDeployOK <> 1);
+	nError = 1;
+	sMessage = 'security copy failed (missing group on target?): ' | gDeployMsg;
+	ProcessBreak;
+ENDIF;
+#EndRegion
+
+#Region --------------- 3. Refresh ---------------
+ExecuteProcess('}Sys.API.Exec.TI', 'pDB', pTargetDB, 'pCode', 'SecurityRefresh;');
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'SecurityRefresh: ' | gTIStatus);
+IF(gTIStatus @= 'CompletedSuccessfully');
+	sResult = 'element security copied and refreshed';
+ELSE;
+	nError = 1;
+	sMessage = 'element security copied but SecurityRefresh failed: ' | gHttpBody;
+ENDIF;
+#EndRegion
+
+#endregion
+#region Epilog
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Beginning Epilog');
+
+gDeployOK = IF(nError = 1, 0, 1);
+gDeployMsg = IF(nError = 1, sMessage, sResult);
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', gDeployMsg);
+
+sStatus = IF(nCritical = 1, 'ERROR', 'SUCCESS');
+ExecuteProcess(cLogProc, 'pFlag', 'END', 'pProc', cProc, 'pMSG', sStatus);
+
+#endregion

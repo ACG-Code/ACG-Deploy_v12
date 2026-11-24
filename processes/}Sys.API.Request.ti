@@ -1,0 +1,103 @@
+#region Prolog
+#****************************************************************
+# }Sys.API.Request
+# Shared helper: one TM1 REST call.
+#  pDB = database name in this tenant, blank = this database, OR an element
+#        of Deployment-Environments (Source, Target1..Target10). For an
+#        environment its own settings are used from 'Deployment Environments':
+#          Database Name, Base URL (blank = this tenant's), Tenant ID (blank =
+#          this tenant's), Secret = element of }API_Control holding its API key
+#          (blank = this tenant's key)
+# Results are returned in global variables:
+#   NumericGlobalVariable('gHttpCode');  StringGlobalVariable('gHttpBody');
+#   StringGlobalVariable('gHttpLocation')  (pAsync = 1: e.g. _async('id'))
+# Responses are requested without @odata annotations.
+# Settings: 'System - Admin Parameters' (Base URL, Database Name)
+#           '}API Control' (Tenant ID, API Key, other environments' keys)
+#****************************************************************
+NumericGlobalVariable('gHttpCode');
+StringGlobalVariable('gHttpBody');
+StringGlobalVariable('gHttpLocation');
+gHttpCode = 0;
+gHttpBody = '';
+gHttpLocation = '';
+
+cAdm = 'System - Admin Parameters';
+cAPI = '}API Control';
+cEnvs = 'Deployment Environments';
+sHost   = CellGetS(cAdm, 'Base URL', 'String');
+sTenant = CellGetS(cAPI, 'Tenant ID', 'String');
+sKey    = CellGetS(cAPI, 'API Key', 'String');
+sDB     = pDB;
+sEnv    = '';
+IF(sDB @= '');
+  sDB = CellGetS(cAdm, 'Database Name', 'String');
+ELSEIF(CubeExists(cEnvs) = 1);
+  IF(DimensionElementExists('Deployment-Environments', pDB) = 1);
+    sEnv = DimensionElementPrincipalName('Deployment-Environments', pDB);
+    sDB = CellGetS(cEnvs, sEnv, 'Database Name');
+    s = CellGetS(cEnvs, sEnv, 'Base URL');
+    IF(s @<> '');
+      sHost = s;
+    ENDIF;
+    s = CellGetS(cEnvs, sEnv, 'Tenant ID');
+    IF(s @<> '');
+      sTenant = s;
+    ENDIF;
+    s = CellGetS(cEnvs, sEnv, 'Secret');
+    IF(s @<> '');
+      IF(DimensionElementExists('}API_Control', s) = 1);
+        sKey = CellGetS(cAPI, s, 'String');
+      ELSE;
+        sKey = '';
+      ENDIF;
+    ENDIF;
+  ENDIF;
+ENDIF;
+
+IF(sHost @= '' % sTenant @= '' % sKey @= '' % sDB @= '');
+  gHttpCode = -1;
+  gHttpBody = 'missing Base URL, Tenant ID, API Key or Database Name' | IF(sEnv @= '', '', ' for environment ' | sEnv);
+  ProcessBreak;
+ENDIF;
+
+# encode spaces in the database name
+sOut = '';
+k = 1;
+WHILE(k <= Long(sDB));
+  c = Subst(sDB, k, 1);
+  IF(c @= ' ');
+    sOut = sOut | '%20';
+  ELSE;
+    sOut = sOut | c;
+  ENDIF;
+  k = k + 1;
+END;
+
+sURL  = sHost | '/api/' | sTenant | '/v0/tm1/' | sOut | '/api/v1' | pPath;
+sAuth = '-u apikey:' | sKey;
+sCT   = '-h Content-Type:application/json';
+sAcc  = '-h Accept:application/json;odata.metadata=none';
+sPref = IF(pAsync = 1, '-h Prefer:respond-async', '-h Prefer:return=representation');
+
+IF(pBody @= '');
+  ExecuteHttpRequest(pMethod, sURL, sAuth, sCT, sAcc, sPref);
+ELSE;
+  ExecuteHttpRequest(pMethod, sURL, sAuth, sCT, sAcc, sPref, '-d ' | pBody);
+ENDIF;
+
+gHttpCode = HttpResponseGetStatusCode();
+gHttpBody = HttpResponseGetBody();
+IF(pAsync = 1);
+  gHttpLocation = HttpResponseGetHeader('Location');
+ENDIF;
+
+IF(pLog = 1);
+  DatasourceASCIIQuoteCharacter = '';
+  sLog = 'Raw_Reports/Sys.API.Request.md';
+  ASCIIOutput(sLog, pMethod | ' ' | sDB | IF(sEnv @= '', '', ' (' | sEnv | ' @ ' | sHost | ' / ' | sTenant | ')') | pPath);
+  ASCIIOutput(sLog, 'HTTP ' | NumberToString(gHttpCode) | IF(pAsync = 1, ' Location=' | gHttpLocation, ''));
+  ASCIIOutput(sLog, gHttpBody);
+ENDIF;
+
+#endregion

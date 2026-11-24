@@ -1,0 +1,207 @@
+#region Prolog
+#Region ############################################# HEADER #############################################
+# Process: }Sys.Deploy.Environment.Register
+# Purpose: Register or update a deployment target environment in one step:
+#            1. checks the caller is in Deploy_Admin
+#            2. works out the URL, tenant and key to use (blank = keep / this tenant)
+#            3. pTest = 1: read-only call to the target (GET /Cubes, 1 row); nothing is saved
+#               unless it returns HTTP 200
+#            4. saves the key in }API Control (element '<Environment> API Key', or the
+#               element already named in the environment's Secret) and fills Database Name,
+#               Base URL, Tenant ID and Secret in 'Deployment Environments'
+#          Re-run with a new pApiKey to rotate a key.
+#          The API key is never logged: only its last 4 characters appear in the Process Log.
+#          }API Control has no group access (admins only) - keep it that way.
+# Date Created: 2026.11.24 (ACGI)
+# Last Update: 2026.11.24
+# Notes:
+#     2026.11.24 (ACGI) - Initial Process Creation
+#EndRegion
+
+#Region --------------- Constants ---------------
+cLogProc = 'PLOG';
+cProc = GetProcessName;
+cUser = NumberToString(DIMIX('}Clients', TM1USER));
+cTimestamp = TIMST(now, '\Y\m\d\h\i\s');
+cRandomInt = NumberToString(INT(RAND() * 1005));
+cView = '%cProc%.%cUser%.%cTimestamp%.%cRandomInt%';
+cTemp = 1;
+cAdm = 'System - Admin Parameters';
+cAPI = '}API Control';
+cAPIDim = '}API_Control';
+cAPIMeas = 'String';
+cEnvs = 'Deployment Environments';
+cEnvDim = 'Deployment-Environments';
+cAdminGrp = 'Deploy_Admin';
+#EndRegion
+
+#Region --------------- Initialize Logging ---------------
+sKeyMask = IF(pApiKey @= '', '(unchanged)', '****' | IF(LONG(pApiKey) >= 12, SUBST(pApiKey, LONG(pApiKey) - 3, 4), ''));
+ExecuteProcess(cLogProc, 'pFlag', 'INIT', 'pProc', cProc);
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pEnvironment=' | pEnvironment, 'pLine', 'P01');
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pDatabase=' | pDatabase, 'pLine', 'P02');
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pBaseURL=' | pBaseURL, 'pLine', 'P03');
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pTenantID=' | pTenantID, 'pLine', 'P04');
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pApiKey=' | sKeyMask, 'pLine', 'P05');
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pTest=' | NumberToString(pTest), 'pLine', 'P06');
+#EndRegion
+
+#Region --------------- Error Handling ---------------
+nError = 0;
+sMessage = '';
+sResult = '';
+
+sIsAdmin = CellGetS('}ClientGroups', TM1User(), cAdminGrp);
+IF(UPPER(sIsAdmin) @<> UPPER(cAdminGrp));
+	nError = 1;
+	sMessage = 'only members of ' | cAdminGrp | ' can register environments';
+ELSEIF(CubeExists(cEnvs) = 0 % CubeExists(cAPI) = 0);
+	nError = 1;
+	sMessage = 'deployment model not found - run }Sys.Deploy.Setup first';
+ELSEIF(pEnvironment @= '' % DimensionElementExists(cEnvDim, pEnvironment) = 0);
+	nError = 1;
+	sMessage = 'pEnvironment: "' | pEnvironment | '" is not an element of ' | cEnvDim;
+ELSEIF(pDatabase @= '');
+	nError = 1;
+	sMessage = 'pDatabase is required';
+ELSEIF(pBaseURL @<> '' & SUBST(LOWER(pBaseURL), 1, 8) @<> 'https://');
+	nError = 1;
+	sMessage = 'pBaseURL must start with https://';
+ELSEIF(SCAN(' ', pApiKey) > 0 % SCAN(' ', pTenantID) > 0);
+	nError = 1;
+	sMessage = 'pApiKey and pTenantID cannot contain spaces';
+ENDIF;
+
+IF(nError = 1);
+	ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', sMessage);
+	ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Critical errors, exiting');
+	ProcessBreak;
+ENDIF;
+#EndRegion
+
+#Region --------------- Variables ---------------
+sEnv = DimensionElementPrincipalName(cEnvDim, pEnvironment);
+sThisHost = CellGetS(cAdm, 'Base URL', 'String');
+sThisTenant = CellGetS(cAPI, 'Tenant ID', cAPIMeas);
+sThisKey = CellGetS(cAPI, 'API Key', cAPIMeas);
+
+# base URL without a trailing /
+sBaseURL = TRIM(pBaseURL);
+WHILE(LONG(sBaseURL) > 0);
+	IF(SUBST(sBaseURL, LONG(sBaseURL), 1) @= '/');
+		sBaseURL = SUBST(sBaseURL, 1, LONG(sBaseURL) - 1);
+	ELSE;
+		BREAK;
+	ENDIF;
+END;
+sHost = IF(sBaseURL @= '', sThisHost, sBaseURL);
+sTenant = IF(pTenantID @= '', sThisTenant, pTenantID);
+nOtherTenant = 0;
+IF(UPPER(sTenant) @<> UPPER(sThisTenant));
+	nOtherTenant = 1;
+ENDIF;
+IF(sBaseURL @<> '');
+	IF(UPPER(sBaseURL) @<> UPPER(sThisHost));
+		nOtherTenant = 1;
+	ENDIF;
+ENDIF;
+
+# key element: the one already named in Secret, else '<Environment> API Key'
+sSecretOld = CellGetS(cEnvs, sEnv, 'Secret');
+sOldKey = '';
+sSecret = sEnv | ' API Key';
+IF(sSecretOld @<> '');
+	IF(DimensionElementExists(cAPIDim, sSecretOld) = 1);
+		sSecret = sSecretOld;
+		sOldKey = CellGetS(cAPI, sSecretOld, cAPIMeas);
+	ENDIF;
+ENDIF;
+
+# key to use: new one, else the environment's stored key, else this tenant's key
+sKey = '';
+sKeySrc = '';
+IF(pApiKey @<> '');
+	sKey = pApiKey;
+	sKeySrc = 'new key';
+ELSEIF(sOldKey @<> '');
+	sKey = sOldKey;
+	sKeySrc = 'stored key in ' | sSecretOld;
+ELSEIF(nOtherTenant = 0);
+	sKey = sThisKey;
+	sKeySrc = 'this tenant''s key';
+ENDIF;
+
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG',
+	'Target ' | sHost | ' / ' | sTenant | ' / ' | pDatabase | IF(nOtherTenant = 1, ' (other tenant)', ' (this tenant)')
+	| ', key: ' | IF(sKey @= '', 'none found', sKeySrc));
+
+IF(sKey @= '');
+	nError = 1;
+	sMessage = IF(nOtherTenant = 1, sEnv | ' is on another tenant and has no stored key - pApiKey is required',
+		'no API key found (}API Control > API Key is blank) - pApiKey is required');
+	ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', sMessage);
+	ProcessBreak;
+ENDIF;
+#EndRegion
+
+#Region --------------- Connection test (nothing saved yet) ---------------
+IF(pTest = 1);
+	sDBUrl = '';
+	nC = 1;
+	WHILE(nC <= LONG(pDatabase));
+		sC = SUBST(pDatabase, nC, 1);
+		sDBUrl = sDBUrl | IF(sC @= ' ', '%20', sC);
+		nC = nC + 1;
+	END;
+	sURL = sHost | '/api/' | sTenant | '/v0/tm1/' | sDBUrl | '/api/v1/Cubes?$select=Name&$top=1';
+	ExecuteHttpRequest('GET', sURL, '-u apikey:' | sKey, '-h Accept:application/json;odata.metadata=none');
+	nCode = HttpResponseGetStatusCode();
+	IF(nCode = 200);
+		ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Connection test: HTTP 200 - OK');
+	ELSE;
+		nError = 1;
+		sMessage = 'connection test failed (HTTP ' | NumberToString(nCode) | ') - '
+			| IF(nCode = 401 % nCode = 403, 'API key rejected',
+			  IF(nCode = 404, 'tenant ID or database name not found',
+			  IF(nCode = 0, 'Base URL not reachable', SUBST(HttpResponseGetBody(), 1, 300))))
+			| '. Nothing was saved.';
+		ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', sMessage);
+		ProcessBreak;
+	ENDIF;
+ELSE;
+	ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Connection test skipped (pTest=0)');
+ENDIF;
+#EndRegion
+
+#Region --------------- Save key ---------------
+IF(pApiKey @<> '');
+	IF(DimensionElementExists(cAPIDim, sSecret) = 0);
+		DimensionElementInsertDirect(cAPIDim, '', sSecret, 'N');
+		ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Created }API_Control element ' | sSecret);
+	ENDIF;
+	CellPutS(pApiKey, cAPI, sSecret, cAPIMeas);
+	ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Key ' | sKeyMask | ' saved in ' | sSecret);
+ENDIF;
+#EndRegion
+
+#Region --------------- Save environment ---------------
+CellPutS(pDatabase, cEnvs, sEnv, 'Database Name');
+CellPutS(sBaseURL, cEnvs, sEnv, 'Base URL');
+CellPutS(pTenantID, cEnvs, sEnv, 'Tenant ID');
+IF(pApiKey @<> '');
+	CellPutS(sSecret, cEnvs, sEnv, 'Secret');
+ENDIF;
+sResult = sEnv | ' registered: ' | pDatabase | IF(nOtherTenant = 1, ' @ ' | sHost | ' / ' | sTenant, ' (this tenant)')
+	| IF(pApiKey @<> '', ', key in ' | sSecret, '') | IF(pTest = 1, ', connection tested', ', NOT tested');
+#EndRegion
+
+#endregion
+#region Epilog
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Beginning Epilog');
+
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', IF(nError = 1, sMessage, sResult));
+
+sStatus = IF(nError = 1, 'ERROR', 'SUCCESS');
+ExecuteProcess(cLogProc, 'pFlag', 'END', 'pProc', cProc, 'pMSG', sStatus);
+
+#endregion

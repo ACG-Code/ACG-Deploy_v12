@@ -1,0 +1,28 @@
+{
+	"@type":"Process",
+	"Name":"}Sys.API.Dim.Security.Copy",
+	"HasSecurityAccess":false,
+	"Code@Code.link":"}Sys.API.Dim.Security.Copy.ti",
+	"DataSource":
+	{
+		"Type":"None"
+	},
+	"Parameters":
+	[
+		{
+			"Name":"pDim",
+			"Prompt":"Dimension whose element security is copied",
+			"Value":"",
+			"Type":"String"
+		},
+		{
+			"Name":"pTargetDB",
+			"Prompt":"Target database (same tenant)",
+			"Value":"",
+			"Type":"String"
+		}
+	],
+	"Variables":[],
+	"UIData": "CubeAction=1511\fDataAction=1503\fCubeLogChanges=0\f",
+	"VariablesUIData": []
+}

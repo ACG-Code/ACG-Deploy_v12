@@ -1,0 +1,247 @@
+#region Prolog
+#Region ############################################# HEADER #############################################
+# Process: }Sys.API.Cube.Data.Push
+# Purpose: Copy stored values of pCube (this database) to the same cube in the pTargetDB
+#          environment: a local view is read and cells are sent in batches to
+#          POST /Cubes('x')/tm1.Update. Zeros, consolidations (unless pAllElements = 1) and
+#          rule-calculated values are skipped. Up to 20 dimensions.
+#          Used for attribute cubes, }ElementSecurity_ cubes and small/medium cubes.
+#          Returns NumericGlobalVariable('gDeployOK') and StringGlobalVariable('gDeployMsg').
+# Date Created: 2026.11.24 (ACGI)
+# Last Update: 2026.11.24
+# Notes:
+#     2026.11.24 (ACGI) - Initial Process Creation
+#     2026.11.24 (ACGI) - Process Example standard + PLOG logging; status in gDeployOK
+#     2026.11.24 (ACGI) - Process Log status (T08): ERROR only for critical errors
+#EndRegion
+
+#Region --------------- Constants ---------------
+cLogProc = 'PLOG';
+cProc = GetProcessName;
+cUser = NumberToString(DIMIX('}Clients', TM1USER));
+cTimestamp = TIMST(now, '\Y\m\d\h\i\s');
+cRandomInt = NumberToString(INT(RAND() * 1005));
+cView = '%cProc%.%cUser%.%cTimestamp%.%cRandomInt%';
+cTemp = 1;
+cMaxLen = 60000;
+NumericGlobalVariable('gHttpCode');
+StringGlobalVariable('gHttpBody');
+StringGlobalVariable('gEnc');
+StringGlobalVariable('gTIStatus');
+NumericGlobalVariable('gDeployOK');
+StringGlobalVariable('gDeployMsg');
+#EndRegion
+
+#Region --------------- Initialize Logging ---------------
+ExecuteProcess(cLogProc, 'pFlag', 'INIT', 'pProc', cProc);
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pCube=' | pCube, 'pLine', 'P01');
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pTargetDB=' | pTargetDB, 'pLine', 'P02');
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pAllElements=' | NumberToString(pAllElements), 'pLine', 'P03');
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pClear=' | NumberToString(pClear), 'pLine', 'P04');
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pBatch=' | NumberToString(pBatch), 'pLine', 'P05');
+#EndRegion
+
+#Region --------------- Error Handling ---------------
+nError = 0;
+nCritical = 0;
+sMessage = '';
+sResult = '';
+
+IF(CubeExists(pCube) = 0);
+	nError = 1;
+	sMessage = 'pCube: "' | pCube | '" not found';
+ELSEIF(CubeDimensionCountGet(pCube) > 20);
+	nError = 1;
+	sMessage = 'pCube has more than 20 dimensions';
+ELSEIF(pTargetDB @= '');
+	nError = 1;
+	sMessage = 'pTargetDB is required';
+ENDIF;
+
+IF(nError = 0);
+	ExecuteProcess('}Sys.API.Encode', 'pText', pCube, 'pMode', 'key');
+	sCubePath = '/Cubes(''' | gEnc | ''')';
+	ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'GET', 'pPath', sCubePath | '?$select=Name');
+	IF(gHttpCode <> 200);
+		nError = 1;
+		sMessage = 'target cube check HTTP ' | NumberToString(gHttpCode) | ': ' | gHttpBody;
+	ENDIF;
+ENDIF;
+
+IF(nError = 1);
+	ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', sMessage);
+	ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Critical errors, exiting');
+	nCritical = 1;
+	ProcessBreak;
+ENDIF;
+#EndRegion
+
+#Region --------------- Variables ---------------
+sView = EXPAND(cView);
+nDims = CubeDimensionCountGet(pCube);
+sBatch = '';
+nB = 0;
+nSent = 0;
+nCalls = 0;
+nDataHdr = 0;
+nData = 0;
+#EndRegion
+
+#Region --------------- Optional clear on target ---------------
+IF(pClear = 1);
+	sCubeTI = '';
+	nC = 1;
+	WHILE(nC <= LONG(pCube));
+		sC = SUBST(pCube, nC, 1);
+		sCubeTI = sCubeTI | IF(sC @= '''', '''''', sC);
+		nC = nC + 1;
+	END;
+	ExecuteProcess('}Sys.API.Exec.TI', 'pDB', pTargetDB, 'pCode', 'CubeClearData(''' | sCubeTI | ''');');
+	ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Clear target: ' | gTIStatus);
+	IF(gTIStatus @<> 'CompletedSuccessfully');
+		nError = 1;
+		sMessage = 'clear of target cube failed: ' | gHttpBody;
+		ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', sMessage);
+		ProcessBreak;
+	ENDIF;
+ENDIF;
+#EndRegion
+
+#Region --------------- Bind prefixes per dimension (Char(1)-separated) ---------------
+sPreAll = '';
+nD = 1;
+WHILE(nD <= nDims);
+	ExecuteProcess('}Sys.API.Encode', 'pText', TABDIM(pCube, nD), 'pMode', 'bind');
+	sPreAll = sPreAll | 'Dimensions(''' | gEnc | ''')/Hierarchies(''' | gEnc | ''')/Elements(''' | Char(1);
+	nD = nD + 1;
+END;
+#EndRegion
+
+#Region --------------- Source View ---------------
+IF(ViewExists(pCube, sView) = 1);
+	ViewDestroy(pCube, sView);
+ENDIF;
+ViewCreate(pCube, sView, cTemp);
+nD = 1;
+WHILE(nD <= nDims);
+	sDim = TABDIM(pCube, nD);
+	sDimMDX = '';
+	nC = 1;
+	WHILE(nC <= LONG(sDim));
+		sC = SUBST(sDim, nC, 1);
+		sDimMDX = sDimMDX | IF(sC @= ']', ']]', sC);
+		nC = nC + 1;
+	END;
+	IF(pAllElements = 1);
+		sMDX = '{TM1SUBSETALL([' | sDimMDX | '])}';
+	ELSE;
+		sMDX = '{TM1FILTERBYLEVEL({TM1SUBSETALL([' | sDimMDX | '])}, 0)}';
+	ENDIF;
+	IF(SubsetExists(sDim, sView) = 1);
+		SubsetDestroy(sDim, sView);
+	ENDIF;
+	SubsetCreateByMDX(sView, sMDX, sDim, cTemp);
+	ViewSubsetAssign(pCube, sView, sDim, sView);
+	nD = nD + 1;
+END;
+ViewExtractSkipZeroesSet(pCube, sView, 1);
+ViewExtractSkipCalcsSet(pCube, sView, IF(pAllElements = 1, 0, 1));
+ViewExtractSkipRuleValuesSet(pCube, sView, 1);
+
+DatasourceType = 'VIEW';
+DatasourceNameForServer = pCube;
+DatasourceCubeView = sView;
+#EndRegion
+
+#endregion
+#region Data
+IF(nDataHdr = 0);
+	ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Beginning Data');
+	nDataHdr = 1;
+ENDIF;
+
+#Region --------------- Tuple ---------------
+sTuple = '';
+sRest = sPreAll;
+nD = 1;
+WHILE(nD <= nDims);
+	nPos = SCAN(Char(1), sRest);
+	sPre = SUBST(sRest, 1, nPos - 1);
+	sRest = SUBST(sRest, nPos + 1, LONG(sRest) - nPos);
+	sE = EXPAND('%v' | NumberToString(nD) | '%');
+	IF(SCAN('''', sE) > 0 % SCAN('"', sE) > 0 % SCAN('\', sE) > 0);
+		ExecuteProcess('}Sys.API.Encode', 'pText', sE, 'pMode', 'bind');
+		sE = gEnc;
+	ENDIF;
+	sTuple = sTuple | IF(nD > 1, ',', '') | '"' | sPre | sE | ''')"';
+	nD = nD + 1;
+END;
+#EndRegion
+
+#Region --------------- Value ---------------
+IF(Value_Is_String = 1);
+	sV = SValue;
+	IF(SCAN('"', sV) > 0 % SCAN('\', sV) > 0 % SCAN(Char(10), sV) > 0 % SCAN(Char(13), sV) > 0 % SCAN(Char(9), sV) > 0);
+		ExecuteProcess('}Sys.API.Encode', 'pText', sV, 'pMode', 'json');
+		sV = gEnc;
+	ENDIF;
+	sVal = '"' | sV | '"';
+ELSE;
+	sVal = NumberToString(NValue);
+ENDIF;
+sBatch = sBatch | IF(nB > 0, ',', '') | '{"Cells":[{"Tuple@odata.bind":[' | sTuple | ']}],"Value":' | sVal | '}';
+nB = nB + 1;
+#EndRegion
+
+#Region --------------- Send batch ---------------
+IF(nB >= pBatch % LONG(sBatch) > cMaxLen);
+	ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'POST', 'pPath', sCubePath | '/tm1.Update', 'pBody', '[' | sBatch | ']');
+	nCalls = nCalls + 1;
+	IF(gHttpCode < 200 % gHttpCode > 299);
+		nError = 1;
+		sMessage = 'batch ' | NumberToString(nCalls) | ' failed (HTTP ' | NumberToString(gHttpCode) | '): ' | gHttpBody;
+		ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', sMessage);
+		ProcessBreak;
+	ENDIF;
+	nSent = nSent + nB;
+	sBatch = '';
+	nB = 0;
+ENDIF;
+#EndRegion
+
+nData = nData + 1;
+
+#endregion
+#region Epilog
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Beginning Epilog');
+
+#Region --------------- Last batch ---------------
+IF(nError = 0 & nB > 0);
+	ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'POST', 'pPath', sCubePath | '/tm1.Update', 'pBody', '[' | sBatch | ']');
+	nCalls = nCalls + 1;
+	IF(gHttpCode < 200 % gHttpCode > 299);
+		nError = 1;
+		sMessage = 'batch ' | NumberToString(nCalls) | ' failed (HTTP ' | NumberToString(gHttpCode) | '): ' | gHttpBody;
+	ELSE;
+		nSent = nSent + nB;
+	ENDIF;
+ENDIF;
+#EndRegion
+
+#Region --------------- Cleanup ---------------
+IF(CubeExists(pCube) = 1);
+	IF(ViewExists(pCube, sView) = 1);
+		ViewDestroy(pCube, sView);
+	ENDIF;
+ENDIF;
+#EndRegion
+
+sResult = NumberToString(nSent) | ' cells copied in ' | NumberToString(nCalls) | ' calls';
+gDeployOK = IF(nError = 1, 0, 1);
+gDeployMsg = IF(nError = 1, sMessage, sResult);
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', gDeployMsg);
+
+sStatus = IF(nCritical = 1, 'ERROR', 'SUCCESS');
+ExecuteProcess(cLogProc, 'pFlag', 'END', 'pProc', cProc, 'pMSG', sStatus);
+
+#endregion

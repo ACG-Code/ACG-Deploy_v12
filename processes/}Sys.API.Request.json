@@ -1,0 +1,52 @@
+{
+	"@type":"Process",
+	"Name":"}Sys.API.Request",
+	"HasSecurityAccess":false,
+	"Code@Code.link":"}Sys.API.Request.ti",
+	"DataSource":
+	{
+		"Type":"None"
+	},
+	"Parameters":
+	[
+		{
+			"Name":"pDB",
+			"Prompt":"Database name (blank = this database, from System - Admin Parameters)",
+			"Value":"",
+			"Type":"String"
+		},
+		{
+			"Name":"pMethod",
+			"Prompt":"GET, POST, PATCH, DELETE",
+			"Value":"GET",
+			"Type":"String"
+		},
+		{
+			"Name":"pPath",
+			"Prompt":"Path after /api/v1, e.g. /Dimensions('x')",
+			"Value":"",
+			"Type":"String"
+		},
+		{
+			"Name":"pBody",
+			"Prompt":"JSON body (optional)",
+			"Value":"",
+			"Type":"String"
+		},
+		{
+			"Name":"pLog",
+			"Prompt":"1 = write request/response to Raw_Reports/Sys.API.Request.md",
+			"Value":0,
+			"Type":"Numeric"
+		},
+		{
+			"Name":"pAsync",
+			"Prompt":"1 = send Prefer: respond-async; job path returned in gHttpLocation",
+			"Value":0,
+			"Type":"Numeric"
+		}
+	],
+	"Variables":[],
+	"UIData": "CubeAction=1511\fDataAction=1503\fCubeLogChanges=0\f",
+	"VariablesUIData": []
+}

@@ -1,0 +1,257 @@
+#region Prolog
+#Region ############################################# HEADER #############################################
+# Process: }Sys.API.Dim.Copy.ToDatabase   (Dimension items)
+# Purpose: Copy dimension pDim from this database to the pTargetDB environment.
+#            Structure : target missing -> POST whole dimension
+#                        target exists  -> PATCH each hierarchy (full replace),
+#                                          POST hierarchies missing on target
+#            Attributes: definitions always; then by option
+#              pAttrValues -> }Sys.API.Cube.Data.Push (}ElementAttributes_<dim>)
+#              pAttrRules  -> }Sys.API.Object.Copy Rule (}ElementAttributes_<dim>)
+#              pSubsets    -> }Sys.API.Subset.Copy, every public subset, every hierarchy
+#              pSecurity   -> }Sys.API.Dim.Security.Copy
+#          WARNING: PATCH replaces a hierarchy - target elements that are not in the source
+#          are deleted along with their data.
+#          Returns NumericGlobalVariable('gDeployOK') and StringGlobalVariable('gDeployMsg').
+# Date Created: 2026.11.24 (ACGI)
+# Last Update: 2026.11.24
+# Notes:
+#     2026.11.24 (ACGI) - Initial Process Creation
+#     2026.11.24 (ACGI) - Process Example standard + PLOG logging; children checked via gDeployOK
+#     2026.11.24 (ACGI) - Process Log status (T08): ERROR only for critical errors
+#EndRegion
+
+#Region --------------- Constants ---------------
+cLogProc = 'PLOG';
+cProc = GetProcessName;
+cUser = NumberToString(DIMIX('}Clients', TM1USER));
+cTimestamp = TIMST(now, '\Y\m\d\h\i\s');
+cRandomInt = NumberToString(INT(RAND() * 1005));
+cView = '%cProc%.%cUser%.%cTimestamp%.%cRandomInt%';
+cTemp = 1;
+cHierExp = '$select=Name;$expand=Elements($select=Name,Type),Edges($select=ParentName,ComponentName,Weight)';
+cHierExpQ = '?$select=Name&$expand=Elements($select=Name,Type),Edges($select=ParentName,ComponentName,Weight)';
+NumericGlobalVariable('gHttpCode');
+StringGlobalVariable('gHttpBody');
+StringGlobalVariable('gEnc');
+NumericGlobalVariable('gDeployOK');
+StringGlobalVariable('gDeployMsg');
+#EndRegion
+
+#Region --------------- Initialize Logging ---------------
+ExecuteProcess(cLogProc, 'pFlag', 'INIT', 'pProc', cProc);
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pDim=' | pDim, 'pLine', 'P01');
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pTargetDB=' | pTargetDB, 'pLine', 'P02');
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pAttrValues=' | NumberToString(pAttrValues), 'pLine', 'P03');
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pAttrRules=' | NumberToString(pAttrRules), 'pLine', 'P04');
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pSubsets=' | NumberToString(pSubsets), 'pLine', 'P05');
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pSecurity=' | NumberToString(pSecurity), 'pLine', 'P06');
+#EndRegion
+
+#Region --------------- Error Handling ---------------
+nError = 0;
+nCritical = 0;
+sMessage = '';
+sResult = '';
+
+IF(pDim @= '' % DimensionExists(pDim) = 0);
+	nError = 1;
+	sMessage = 'pDim: "' | pDim | '" not found on source';
+ELSEIF(pTargetDB @= '');
+	nError = 1;
+	sMessage = 'pTargetDB is required';
+ENDIF;
+
+IF(nError = 1);
+	ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', sMessage);
+	ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Critical errors, exiting');
+	nCritical = 1;
+	ProcessBreak;
+ENDIF;
+#EndRegion
+
+#Region --------------- Variables ---------------
+ExecuteProcess('}Sys.API.Encode', 'pText', pDim, 'pMode', 'key');
+sDimKey = gEnc;
+sDimURL = '/Dimensions(''' | sDimKey | ''')';
+sAttrDim = '}ElementAttributes_' | pDim;
+sFail = '';
+
+# hierarchies of this dimension (Char(1)-separated, Leaves skipped)
+sHiers = '';
+sHDim = '}Hierarchies_' | pDim;
+IF(DimensionExists(sHDim) = 1);
+	nI = 1;
+	WHILE(nI <= DIMSIZ(sHDim));
+		sH = DIMNM(sHDim, nI);
+		IF(SCAN(':', sH) > 0);
+			sH = SUBST(sH, SCAN(':', sH) + 1, LONG(sH));
+		ENDIF;
+		IF(sH @<> 'Leaves');
+			sHiers = sHiers | sH | Char(1);
+		ENDIF;
+		nI = nI + 1;
+	END;
+ENDIF;
+IF(sHiers @= '');
+	sHiers = pDim | Char(1);
+ENDIF;
+#EndRegion
+
+#Region --------------- 1. Structure ---------------
+ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'GET', 'pPath', sDimURL | '?$select=Name');
+IF(gHttpCode = 404);
+	ExecuteProcess('}Sys.API.Request', 'pDB', '', 'pMethod', 'GET', 'pPath', sDimURL | '?$select=Name&$expand=Hierarchies(' | cHierExp | ')');
+	IF(gHttpCode <> 200);
+		nError = 1;
+		sMessage = 'read failed (HTTP ' | NumberToString(gHttpCode) | '): ' | gHttpBody;
+		ProcessBreak;
+	ENDIF;
+	ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'POST', 'pPath', '/Dimensions', 'pBody', gHttpBody);
+	IF(gHttpCode <> 201);
+		nError = 1;
+		sMessage = 'create failed (HTTP ' | NumberToString(gHttpCode) | '): ' | gHttpBody;
+		ProcessBreak;
+	ENDIF;
+	sResult = 'dimension created';
+ELSEIF(gHttpCode = 200);
+	nH = 0;
+	sRest = sHiers;
+	nPos = SCAN(Char(1), sRest);
+	WHILE(nPos > 0);
+		sH = SUBST(sRest, 1, nPos - 1);
+		sRest = SUBST(sRest, nPos + 1, LONG(sRest) - nPos);
+		ExecuteProcess('}Sys.API.Encode', 'pText', sH, 'pMode', 'key');
+		sHierURL = sDimURL | '/Hierarchies(''' | gEnc | ''')';
+		ExecuteProcess('}Sys.API.Request', 'pDB', '', 'pMethod', 'GET', 'pPath', sHierURL | cHierExpQ);
+		IF(gHttpCode <> 200);
+			nError = 1;
+			sMessage = 'read of hierarchy ' | sH | ' failed (HTTP ' | NumberToString(gHttpCode) | ')';
+			ProcessBreak;
+		ENDIF;
+		sJSON = gHttpBody;
+		ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'GET', 'pPath', sHierURL | '?$select=Name');
+		IF(gHttpCode = 200);
+			ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'PATCH', 'pPath', sHierURL, 'pBody', sJSON);
+			sAction = 'updated';
+		ELSE;
+			ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'POST', 'pPath', sDimURL | '/Hierarchies', 'pBody', sJSON);
+			sAction = 'created';
+		ENDIF;
+		ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Hierarchy ' | sH | ' ' | sAction | ' HTTP ' | NumberToString(gHttpCode));
+		IF(gHttpCode < 200 % gHttpCode > 299);
+			nError = 1;
+			sMessage = 'hierarchy ' | sH | ' ' | sAction | ' failed (HTTP ' | NumberToString(gHttpCode) | '): ' | gHttpBody;
+			ProcessBreak;
+		ENDIF;
+		nH = nH + 1;
+		nPos = SCAN(Char(1), sRest);
+	END;
+	sResult = NumberToString(nH) | ' hierarchies updated';
+ELSE;
+	nError = 1;
+	sMessage = 'target check failed (HTTP ' | NumberToString(gHttpCode) | '): ' | gHttpBody;
+	ProcessBreak;
+ENDIF;
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', sResult);
+#EndRegion
+
+#Region --------------- 2. Attribute definitions ---------------
+nAttrNew = 0;
+IF(DimensionExists(sAttrDim) = 1);
+	sAttrBase = sDimURL | '/Hierarchies(''' | sDimKey | ''')/ElementAttributes';
+	nA = 1;
+	WHILE(nA <= DIMSIZ(sAttrDim));
+		sAttr = DIMNM(sAttrDim, nA);
+		sT = DTYPE(sAttrDim, sAttr);
+		sType = IF(sT @= 'AA', 'Alias', IF(sT @= 'AN', 'Numeric', 'String'));
+		ExecuteProcess('}Sys.API.Encode', 'pText', sAttr, 'pMode', 'key');
+		ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'GET', 'pPath', sAttrBase | '(''' | gEnc | ''')?$select=Name');
+		IF(gHttpCode <> 200);
+			ExecuteProcess('}Sys.API.Encode', 'pText', sAttr, 'pMode', 'json');
+			ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'POST', 'pPath', sAttrBase, 'pBody', '{"Name":"' | gEnc | '","Type":"' | sType | '"}');
+			ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Attribute ' | sAttr | ' (' | sType | ') created HTTP ' | NumberToString(gHttpCode));
+			IF(gHttpCode < 200 % gHttpCode > 299);
+				sFail = sFail | IF(sFail @= '', '', '; ') | 'attribute ' | sAttr | ': ' | gHttpBody;
+			ELSE;
+				nAttrNew = nAttrNew + 1;
+			ENDIF;
+		ENDIF;
+		nA = nA + 1;
+	END;
+ENDIF;
+sResult = sResult | ', ' | NumberToString(nAttrNew) | ' new attributes';
+#EndRegion
+
+#Region --------------- 3. Attribute values ---------------
+IF(pAttrValues = 1 & CubeExists(sAttrDim) = 1 & sFail @= '');
+	ExecuteProcess('}Sys.API.Cube.Data.Push', 'pCube', sAttrDim, 'pTargetDB', pTargetDB, 'pAllElements', 1, 'pClear', 0);
+	ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Attribute values: ' | gDeployMsg);
+	IF(gDeployOK = 1);
+		sResult = sResult | ', attribute values: ' | gDeployMsg;
+	ELSE;
+		sFail = sFail | IF(sFail @= '', '', '; ') | 'attribute values: ' | gDeployMsg;
+	ENDIF;
+ENDIF;
+#EndRegion
+
+#Region --------------- 4. Attribute rules ---------------
+IF(pAttrRules = 1 & CubeExists(sAttrDim) = 1);
+	ExecuteProcess('}Sys.API.Object.Copy', 'pType', 'Rule', 'pName', sAttrDim, 'pTargetDB', pTargetDB);
+	ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Attribute rules: ' | gDeployMsg);
+	IF(gDeployOK = 1);
+		sResult = sResult | ', attribute rules: ' | gDeployMsg;
+	ELSE;
+		sFail = sFail | IF(sFail @= '', '', '; ') | 'attribute rules: ' | gDeployMsg;
+	ENDIF;
+ENDIF;
+#EndRegion
+
+#Region --------------- 5. Subsets ---------------
+IF(pSubsets = 1);
+	sRest = sHiers;
+	nPos = SCAN(Char(1), sRest);
+	WHILE(nPos > 0);
+		sH = SUBST(sRest, 1, nPos - 1);
+		sRest = SUBST(sRest, nPos + 1, LONG(sRest) - nPos);
+		ExecuteProcess('}Sys.API.Subset.Copy', 'pDim', pDim, 'pHier', sH, 'pSubsets', '', 'pTargetDB', pTargetDB);
+		ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Subsets ' | sH | ': ' | gDeployMsg);
+		IF(gDeployOK = 1);
+			sResult = sResult | ', subsets ' | sH | ': ' | gDeployMsg;
+		ELSE;
+			sFail = sFail | IF(sFail @= '', '', '; ') | 'subsets ' | sH | ': ' | gDeployMsg;
+		ENDIF;
+		nPos = SCAN(Char(1), sRest);
+	END;
+ENDIF;
+#EndRegion
+
+#Region --------------- 6. Element security ---------------
+IF(pSecurity = 1);
+	ExecuteProcess('}Sys.API.Dim.Security.Copy', 'pDim', pDim, 'pTargetDB', pTargetDB);
+	ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Security: ' | gDeployMsg);
+	IF(gDeployOK = 1);
+		sResult = sResult | ', ' | gDeployMsg;
+	ELSE;
+		sFail = sFail | IF(sFail @= '', '', '; ') | 'security: ' | gDeployMsg;
+	ENDIF;
+ENDIF;
+#EndRegion
+
+IF(sFail @<> '');
+	nError = 1;
+	sMessage = sFail;
+ENDIF;
+
+#endregion
+#region Epilog
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Beginning Epilog');
+
+gDeployOK = IF(nError = 1, 0, 1);
+gDeployMsg = IF(nError = 1, sMessage, sResult);
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', gDeployMsg);
+
+sStatus = IF(nCritical = 1, 'ERROR', 'SUCCESS');
+ExecuteProcess(cLogProc, 'pFlag', 'END', 'pProc', cProc, 'pMSG', sStatus);
+
+#endregion

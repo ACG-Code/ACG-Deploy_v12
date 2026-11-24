@@ -1,0 +1,52 @@
+{
+	"@type":"Process",
+	"Name":"}Sys.Deploy.Environment.Register",
+	"HasSecurityAccess":false,
+	"Code@Code.link":"}Sys.Deploy.Environment.Register.ti",
+	"DataSource":
+	{
+		"Type":"None"
+	},
+	"Parameters":
+	[
+		{
+			"Name":"pEnvironment",
+			"Prompt":"Environment (element of Deployment-Environments, e.g. Target2)",
+			"Value":"",
+			"Type":"String"
+		},
+		{
+			"Name":"pDatabase",
+			"Prompt":"Database name on the target",
+			"Value":"",
+			"Type":"String"
+		},
+		{
+			"Name":"pBaseURL",
+			"Prompt":"Base URL of the target PA SaaS tenant, e.g. https://us-east-1.planninganalytics.saas.ibm.com (blank = this tenant)",
+			"Value":"",
+			"Type":"String"
+		},
+		{
+			"Name":"pTenantID",
+			"Prompt":"Tenant ID of the target (blank = this tenant)",
+			"Value":"",
+			"Type":"String"
+		},
+		{
+			"Name":"pApiKey",
+			"Prompt":"API key for the target (blank = keep the current key)",
+			"Value":"",
+			"Type":"String"
+		},
+		{
+			"Name":"pTest",
+			"Prompt":"1 = test the connection first and save only if it works",
+			"Value":1,
+			"Type":"Numeric"
+		}
+	],
+	"Variables":[],
+	"UIData": "CubeAction=1511\fDataAction=1503\fCubeLogChanges=0\f",
+	"VariablesUIData": []
+}

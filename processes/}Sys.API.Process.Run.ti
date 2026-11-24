@@ -1,0 +1,172 @@
+#region Prolog
+#Region ############################################# HEADER #############################################
+# Process: }Sys.API.Process.Run   (RunTI items)
+# Purpose: Run a saved process on the pTargetDB environment with up to 10 parameters
+#          ('name|value', as in the Deployment cube Parameter 1-10 cells). Runs async
+#          (no gateway timeout) and checks every pPoll seconds until done or pTimeout seconds
+#          pass. A timed-out process is never cancelled.
+#          Returns NumericGlobalVariable('gDeployOK'), StringGlobalVariable('gDeployMsg') and
+#          StringGlobalVariable('gTIStatus').
+# Date Created: 2026.11.24 (ACGI)
+# Last Update: 2026.11.24
+# Notes:
+#     2026.11.24 (ACGI) - Initial Process Creation
+#     2026.11.24 (ACGI) - Process Example standard + PLOG logging
+#     2026.11.24 (ACGI) - Process Log status (T08): ERROR only for critical errors
+#EndRegion
+
+#Region --------------- Constants ---------------
+cLogProc = 'PLOG';
+cProc = GetProcessName;
+cUser = NumberToString(DIMIX('}Clients', TM1USER));
+cTimestamp = TIMST(now, '\Y\m\d\h\i\s');
+cRandomInt = NumberToString(INT(RAND() * 1005));
+cView = '%cProc%.%cUser%.%cTimestamp%.%cRandomInt%';
+cTemp = 1;
+NumericGlobalVariable('gHttpCode');
+StringGlobalVariable('gHttpBody');
+StringGlobalVariable('gHttpLocation');
+StringGlobalVariable('gEnc');
+StringGlobalVariable('gTIStatus');
+NumericGlobalVariable('gDeployOK');
+StringGlobalVariable('gDeployMsg');
+#EndRegion
+
+#Region --------------- Initialize Logging ---------------
+ExecuteProcess(cLogProc, 'pFlag', 'INIT', 'pProc', cProc);
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pTargetDB=' | pTargetDB, 'pLine', 'P01');
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pProcess=' | pProcess, 'pLine', 'P02');
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pTimeout=' | NumberToString(pTimeout) | ' pPoll=' | NumberToString(pPoll), 'pLine', 'P03');
+#EndRegion
+
+#Region --------------- Error Handling ---------------
+nError = 0;
+nCritical = 0;
+sMessage = '';
+sResult = '';
+gTIStatus = '';
+
+IF(pTargetDB @= '' % pProcess @= '');
+	nError = 1;
+	sMessage = 'pTargetDB and pProcess are required';
+ENDIF;
+
+IF(nError = 1);
+	ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', sMessage);
+	ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Critical errors, exiting');
+	nCritical = 1;
+	ProcessBreak;
+ENDIF;
+#EndRegion
+
+#Region --------------- Parameters -> JSON ---------------
+sParams = '';
+nP = 1;
+WHILE(nP <= 10);
+	sP = IF(nP = 1, pParam1, IF(nP = 2, pParam2, IF(nP = 3, pParam3, IF(nP = 4, pParam4, IF(nP = 5, pParam5,
+		IF(nP = 6, pParam6, IF(nP = 7, pParam7, IF(nP = 8, pParam8, IF(nP = 9, pParam9, pParam10)))))))));
+	nPipe = SCAN('|', sP);
+	IF(nPipe > 1);
+		sPName = SUBST(sP, 1, nPipe - 1);
+		sPVal = SUBST(sP, nPipe + 1, LONG(sP) - nPipe);
+		# plain number -> JSON number, anything else -> JSON string
+		nNum = IF(LONG(sPVal) > 0, 1, 0);
+		nDigits = 0;
+		nC = 1;
+		WHILE(nC <= LONG(sPVal) & nNum = 1);
+			sC = SUBST(sPVal, nC, 1);
+			IF(SCAN(sC, '0123456789') > 0);
+				nDigits = nDigits + 1;
+			ELSEIF(sC @= '-' & nC = 1);
+			ELSEIF(sC @= '.');
+			ELSE;
+				nNum = 0;
+			ENDIF;
+			nC = nC + 1;
+		END;
+		IF(nDigits = 0 % (LONG(sPVal) > 1 & SUBST(sPVal, 1, 1) @= '0' & SUBST(sPVal, 2, 1) @<> '.'));
+			nNum = 0;
+		ENDIF;
+		ExecuteProcess('}Sys.API.Encode', 'pText', sPName, 'pMode', 'json');
+		sItem = '{"Name":"' | gEnc | '","Value":';
+		IF(nNum = 1);
+			sItem = sItem | sPVal | '}';
+		ELSE;
+			ExecuteProcess('}Sys.API.Encode', 'pText', sPVal, 'pMode', 'json');
+			sItem = sItem | '"' | gEnc | '"}';
+		ENDIF;
+		sParams = sParams | IF(sParams @= '', '', ',') | sItem;
+		IF(nP <= 6);
+			ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', sP, 'pLine', 'P0' | NumberToString(nP + 3));
+		ENDIF;
+	ENDIF;
+	nP = nP + 1;
+END;
+sBody = '{"Parameters":[' | sParams | ']}';
+#EndRegion
+
+#Region --------------- Run (async) and wait ---------------
+ExecuteProcess('}Sys.API.Encode', 'pText', pProcess, 'pMode', 'key');
+ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'POST',
+	'pPath', '/Processes(''' | gEnc | ''')/tm1.ExecuteWithReturn?$expand=*', 'pBody', sBody, 'pAsync', 1);
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Started HTTP ' | NumberToString(gHttpCode) | ' ' | gHttpLocation);
+
+IF(gHttpCode = 202 & gHttpLocation @<> '');
+	sJob = '/' | gHttpLocation;
+	tStart = NOW;
+	nDone = 0;
+	WHILE(nDone = 0);
+		Sleep(pPoll * 1000);
+		ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'GET', 'pPath', sJob);
+		IF(gHttpCode = 200);
+			nDone = 1;
+		ELSEIF(gHttpCode <> 202);
+			nDone = 1;
+			nError = 1;
+			sMessage = 'status check failed (HTTP ' | NumberToString(gHttpCode) | '): ' | gHttpBody;
+		ELSEIF((NOW - tStart) * 86400 > pTimeout);
+			nDone = 1;
+			nError = 1;
+			sMessage = 'still running on target after ' | NumberToString(pTimeout) | 's - not cancelled';
+		ENDIF;
+	END;
+ELSEIF(gHttpCode < 200 % gHttpCode > 299);
+	nError = 1;
+	sMessage = 'start failed (HTTP ' | NumberToString(gHttpCode) | '): ' | gHttpBody;
+ENDIF;
+#EndRegion
+
+#Region --------------- Result ---------------
+IF(nError = 0);
+	nPos = SCAN('"ProcessExecuteStatusCode":"', gHttpBody);
+	IF(nPos > 0);
+		sRest = SUBST(gHttpBody, nPos + 28, LONG(gHttpBody) - nPos - 27);
+		gTIStatus = SUBST(sRest, 1, SCAN('"', sRest) - 1);
+	ENDIF;
+	sErrLog = '';
+	nPos = SCAN('"Filename":"', gHttpBody);
+	IF(nPos > 0);
+		sRest = SUBST(gHttpBody, nPos + 12, LONG(gHttpBody) - nPos - 11);
+		sErrLog = SUBST(sRest, 1, SCAN('"', sRest) - 1);
+	ENDIF;
+	IF(gTIStatus @= 'CompletedSuccessfully');
+		sResult = 'CompletedSuccessfully';
+	ELSE;
+		nError = 1;
+		sMessage = IF(gTIStatus @= '', 'unknown result: ' | gHttpBody, gTIStatus) | IF(sErrLog @= '', '', ' - log ' | sErrLog);
+	ENDIF;
+ENDIF;
+#EndRegion
+
+#endregion
+#region Epilog
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Beginning Epilog');
+
+gDeployOK = IF(nError = 1, 0, 1);
+gDeployMsg = IF(nError = 1, sMessage, sResult);
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', gDeployMsg);
+
+sStatus = IF(nCritical = 1, 'ERROR', 'SUCCESS');
+ExecuteProcess(cLogProc, 'pFlag', 'END', 'pProc', cProc, 'pMSG', sStatus);
+
+#endregion

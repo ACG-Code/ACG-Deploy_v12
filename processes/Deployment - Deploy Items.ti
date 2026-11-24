@@ -1,0 +1,270 @@
+#region Prolog
+#Region ############################################# HEADER #############################################
+# Process: Deployment - Deploy Items
+# Purpose: Deploy the active items of a deployment from this database to its targets
+#          with the }Sys.API.* control processes (ExecuteHttpRequest) - PA SaaS / TM1 v12.
+#          Replaces the YAML file + ACG-Deploy.exe step of the on-prem version.
+#            Source : must be this database (the workers read locally and push to targets)
+#            Targets: Target 1-5 per item = elements of Deployment-Environments; each has a
+#                     Database Name and, for another PA SaaS tenant, Base URL, Tenant ID and
+#                     Secret (}API_Control element with its API key). Blank = this tenant.
+#            Items  : Dimension, Subset (Dim|Sub1;Sub2 or Dim:Hier|Sub), Cube, View (Cube|View),
+#                     RunTI, Process, Chore, Rule
+#            Rights : Deploy_Admin = everything; Deploy_User = Dimension, Subset, View, RunTI and
+#                     Cubes with 'Security' in the name
+#            Status : Deployment Start / End / Duration / Status per item and on All Items
+# Date Created: 2026.11.24 (ACGI)
+# Last Update: 2026.11.24
+# Notes:
+#     2026.11.24 (ACGI) - Initial Process Creation (PA SaaS rewrite of the ACG-Deploy TI)
+#     2026.11.24 (ACGI) - Workers called with the target environment (cross-tenant support)
+#     2026.11.24 (ACGI) - Process Example standard: regions, PLOG logging, nError + ProcessBreak
+#     2026.11.24 (ACGI) - Process Log status (T08): ERROR only for critical errors
+#EndRegion
+
+#Region --------------- Constants ---------------
+cLogProc = 'PLOG';
+cProc = GetProcessName;
+cUser = NumberToString(DIMIX('}Clients', TM1USER));
+cTimestamp = TIMST(now, '\Y\m\d\h\i\s');
+cRandomInt = NumberToString(INT(RAND() * 1005));
+cView = '%cProc%.%cUser%.%cTimestamp%.%cRandomInt%';
+cTemp = 1;
+cCube = 'Deployment';
+cEnvs = 'Deployment Environments';
+cEnvDim = 'Deployment-Environments';
+cItems = 'Deployment - Items';
+cAdm = 'System - Admin Parameters';
+cAdminGrp = 'Deploy_Admin';
+cUserGrp = 'Deploy_User';
+cFmt = '\Y-\m-\d \h:\i:\s';
+#EndRegion
+
+#Region --------------- Initialize Logging ---------------
+ExecuteProcess(cLogProc, 'pFlag', 'INIT', 'pProc', cProc);
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pDeployment=' | pDeployment, 'pLine', 'P01');
+#EndRegion
+
+#Region --------------- Error Handling ---------------
+nError = 0;
+nCritical = 0;
+sMessage = '';
+nAdmin = 0;
+
+IF(pDeployment @= '' % DimensionElementExists('Deployments', pDeployment) = 0);
+	nError = 1;
+	sMessage = 'pDeployment: "' | pDeployment | '" is invalid';
+ENDIF;
+
+IF(nError = 0);
+	sUser = TM1User();
+	sIsAdmin = CellGetS('}ClientGroups', sUser, cAdminGrp);
+	sIsUser = CellGetS('}ClientGroups', sUser, cUserGrp);
+	IF(UPPER(sIsAdmin) @<> UPPER(cAdminGrp) & UPPER(sIsUser) @<> UPPER(cUserGrp));
+		nError = 1;
+		sMessage = 'User has no rights to perform deployments';
+	ENDIF;
+	nAdmin = IF(UPPER(sIsAdmin) @= UPPER(cAdminGrp), 1, 0);
+ENDIF;
+
+IF(nError = 0 & UPPER(CellGetS(cCube, pDeployment, 'All Items', 'Active')) @<> 'YES');
+	nError = 1;
+	sMessage = 'Deployment is not Active';
+ENDIF;
+
+sThisDB = CellGetS(cAdm, 'Database Name', 'String');
+sThisTenant = CellGetS('}API Control', 'Tenant ID', 'String');
+IF(nError = 0);
+	sSrcEnv = CellGetS(cCube, pDeployment, 'All Items', 'Source');
+	IF(sSrcEnv @<> '');
+		IF(DimensionElementExists(cEnvDim, sSrcEnv) = 0);
+			nError = 1;
+			sMessage = 'Source environment "' | sSrcEnv | '" not found';
+		ELSE;
+			sSrcDB = CellGetS(cEnvs, DimensionElementPrincipalName(cEnvDim, sSrcEnv), 'Database Name');
+			IF(UPPER(sSrcDB) @<> UPPER(sThisDB));
+				nError = 1;
+				sMessage = 'Source ' | sSrcEnv | ' is ' | sSrcDB | ' - run this process in that database';
+			ENDIF;
+		ENDIF;
+	ENDIF;
+ENDIF;
+
+IF(nError = 1);
+	IF(pDeployment @<> '' & DimensionElementExists('Deployments', pDeployment) = 1);
+		CellPutS(sMessage, cCube, pDeployment, 'All Items', 'Deployment Status');
+	ENDIF;
+	ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', sMessage);
+	ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Critical errors, exiting');
+	nCritical = 1;
+	ProcessBreak;
+ENDIF;
+#EndRegion
+
+#Region --------------- Variables ---------------
+NumericGlobalVariable('gDeployOK');
+StringGlobalVariable('gDeployMsg');
+sView = EXPAND(cView);
+tRunStart = NOW;
+sDefTimeout = CellGetS(cAdm, 'process_timeout', 'String');
+nDefTimeout = IF(sDefTimeout @= '', 14400, StringToNumber(sDefTimeout));
+nItems = 0;
+nFailed = 0;
+#EndRegion
+
+#Region --------------- Deploy Items ---------------
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Deploying ' | pDeployment | ' from ' | sThisDB);
+nLoop = 1;
+nMax = DIMSIZ(cItems);
+WHILE(nLoop <= nMax);
+	sItem = DIMNM(cItems, nLoop);
+	IF(DTYPE(cItems, sItem) @<> 'C' & UPPER(CellGetS(cCube, pDeployment, sItem, 'Active')) @= 'YES');
+		nItems = nItems + 1;
+		sType = CellGetS(cCube, pDeployment, sItem, 'Type');
+		sName = CellGetS(cCube, pDeployment, sItem, 'Name');
+		tStart = NOW;
+		CellPutS(TIMST(tStart, cFmt), cCube, pDeployment, sItem, 'Deployment Start');
+		CellPutS('', cCube, pDeployment, sItem, 'Deployment End');
+		CellPutS('', cCube, pDeployment, sItem, 'Deployment Duration');
+		ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', sItem | ': ' | sType | ' ' | sName);
+
+		#---- rights ----
+		sItemFail = '';
+		IF(nAdmin = 0);
+			IF(sType @= 'Process' % sType @= 'Chore' % sType @= 'Rule');
+				sItemFail = 'Insufficient rights to deploy ' | sType | 's';
+			ELSEIF(sType @= 'Cube' & SCAN('SECURITY', UPPER(sName)) = 0);
+				sItemFail = 'Insufficient rights to deploy Cubes';
+			ENDIF;
+		ENDIF;
+		IF(sItemFail @= '' & sName @= '');
+			sItemFail = 'Name is blank';
+		ENDIF;
+
+		#---- each target ----
+		nTargets = 0;
+		nT = 1;
+		WHILE(nT <= 5 & sItemFail @= '' % nT <= 5 & nTargets > 0);
+			sTEnv = CellGetS(cCube, pDeployment, sItem, 'Target ' | NumberToString(nT));
+			IF(sTEnv @<> '' & UPPER(sTEnv) @<> 'NONE');
+				nTargets = nTargets + 1;
+				sTDB = '';
+				sTTenant = '';
+				IF(DimensionElementExists(cEnvDim, sTEnv) = 1);
+					sTEnv = DimensionElementPrincipalName(cEnvDim, sTEnv);
+					sTDB = CellGetS(cEnvs, sTEnv, 'Database Name');
+					sTTenant = CellGetS(cEnvs, sTEnv, 'Tenant ID');
+				ENDIF;
+				nSameTenant = IF(sTTenant @= '' % UPPER(sTTenant) @= UPPER(sThisTenant), 1, 0);
+				gDeployOK = 0;
+				gDeployMsg = '';
+
+				# workers get the environment; }Sys.API.Request resolves its database, URL, tenant and key
+				IF(sTDB @= '');
+					gDeployMsg = 'no Database Name for environment ' | sTEnv;
+				ELSEIF(nSameTenant = 1 & UPPER(sTDB) @= UPPER(sThisDB) & sType @<> 'RunTI');
+					gDeployMsg = 'target is the source database';
+				ELSEIF(sType @= 'Dimension');
+					ExecuteProcess('}Sys.API.Dim.Copy.ToDatabase', 'pDim', sName, 'pTargetDB', sTEnv,
+						'pAttrValues', IF(UPPER(CellGetS(cCube, pDeployment, sItem, 'Include Attribute Values')) @= 'YES', 1, 0),
+						'pAttrRules', IF(UPPER(CellGetS(cCube, pDeployment, sItem, 'Copy Attribute Rules')) @= 'YES', 1, 0),
+						'pSubsets', IF(UPPER(CellGetS(cCube, pDeployment, sItem, 'Include Subsets')) @= 'YES', 1, 0),
+						'pSecurity', IF(UPPER(CellGetS(cCube, pDeployment, sItem, 'Include Security Cube')) @= 'YES', 1, 0));
+				ELSEIF(sType @= 'Subset');
+					nPipe = SCAN('|', sName);
+					IF(nPipe <= 1);
+						gDeployMsg = 'Subset Name must be Dimension|Subset';
+					ELSE;
+						sSubDim = SUBST(sName, 1, nPipe - 1);
+						sSubs = SUBST(sName, nPipe + 1, LONG(sName) - nPipe);
+						sSubHier = '';
+						nColon = SCAN(':', sSubDim);
+						IF(nColon > 1);
+							sSubHier = SUBST(sSubDim, nColon + 1, LONG(sSubDim) - nColon);
+							sSubDim = SUBST(sSubDim, 1, nColon - 1);
+						ENDIF;
+						ExecuteProcess('}Sys.API.Subset.Copy', 'pDim', sSubDim, 'pHier', sSubHier, 'pSubsets', sSubs, 'pTargetDB', sTEnv);
+					ENDIF;
+				ELSEIF(sType @= 'Cube');
+					ExecuteProcess('}Sys.API.Cube.Copy', 'pCube', sName, 'pTargetDB', sTEnv, 'pRules', 1, 'pData', 1, 'pClear', 1);
+				ELSEIF(sType @= 'View');
+					nPipe = SCAN('|', sName);
+					IF(nPipe <= 1);
+						gDeployMsg = 'View Name must be Cube|View';
+					ELSE;
+						ExecuteProcess('}Sys.API.View.Copy', 'pCube', SUBST(sName, 1, nPipe - 1), 'pView', SUBST(sName, nPipe + 1, LONG(sName) - nPipe), 'pTargetDB', sTEnv);
+					ENDIF;
+				ELSEIF(sType @= 'RunTI' % sType @= 'TI');
+					sTO = CellGetS(cCube, pDeployment, sItem, 'Timeout');
+					ExecuteProcess('}Sys.API.Process.Run', 'pTargetDB', sTEnv, 'pProcess', sName,
+						'pParam1', CellGetS(cCube, pDeployment, sItem, 'Parameter 1'),
+						'pParam2', CellGetS(cCube, pDeployment, sItem, 'Parameter 2'),
+						'pParam3', CellGetS(cCube, pDeployment, sItem, 'Parameter 3'),
+						'pParam4', CellGetS(cCube, pDeployment, sItem, 'Parameter 4'),
+						'pParam5', CellGetS(cCube, pDeployment, sItem, 'Parameter 5'),
+						'pParam6', CellGetS(cCube, pDeployment, sItem, 'Parameter 6'),
+						'pParam7', CellGetS(cCube, pDeployment, sItem, 'Parameter 7'),
+						'pParam8', CellGetS(cCube, pDeployment, sItem, 'Parameter 8'),
+						'pParam9', CellGetS(cCube, pDeployment, sItem, 'Parameter 9'),
+						'pParam10', CellGetS(cCube, pDeployment, sItem, 'Parameter 10'),
+						'pTimeout', IF(sTO @= '', nDefTimeout, StringToNumber(sTO)), 'pPoll', 5);
+				ELSEIF(sType @= 'Process' % sType @= 'Chore' % sType @= 'Rule');
+					ExecuteProcess('}Sys.API.Object.Copy', 'pType', sType, 'pName', sName, 'pTargetDB', sTEnv);
+				ELSE;
+					gDeployMsg = 'unknown Type "' | sType | '"';
+				ENDIF;
+
+				ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG',
+					'     ' | sTEnv | ' (' | sTDB | IF(nSameTenant = 1, '', ' @ tenant ' | sTTenant) | '): ' | IF(gDeployOK = 1, 'OK ', 'FAILED ') | gDeployMsg);
+				IF(gDeployOK = 0);
+					sItemFail = sItemFail | IF(sItemFail @= '', '', '; ') | sTEnv | ': ' | IF(gDeployMsg @= '', 'failed - see worker log', gDeployMsg);
+				ENDIF;
+			ENDIF;
+			nT = nT + 1;
+		END;
+		IF(sItemFail @= '' & nTargets = 0);
+			sItemFail = 'No targets specified';
+		ENDIF;
+
+		#---- item status ----
+		tEnd = NOW;
+		CellPutS(TIMST(tEnd, cFmt), cCube, pDeployment, sItem, 'Deployment End');
+		CellPutS(NumberToString(ROUND((tEnd - tStart) * 86400)), cCube, pDeployment, sItem, 'Deployment Duration');
+		IF(sItemFail @= '');
+			CellPutS('Success', cCube, pDeployment, sItem, 'Deployment Status');
+		ELSE;
+			nFailed = nFailed + 1;
+			CellPutS(SUBST(sItemFail, 1, 1000), cCube, pDeployment, sItem, 'Deployment Status');
+			ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', '     ' | sItem | ' FAILED: ' | sItemFail);
+		ENDIF;
+	ENDIF;
+	nLoop = nLoop + 1;
+END;
+#EndRegion
+
+#endregion
+#region Epilog
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Beginning Epilog');
+
+#Region --------------- Overall Status ---------------
+IF(nError = 0);
+	tRunEnd = NOW;
+	CellPutS(TIMST(tRunStart, cFmt), cCube, pDeployment, 'All Items', 'Deployment Start');
+	CellPutS(TIMST(tRunEnd, cFmt), cCube, pDeployment, 'All Items', 'Deployment End');
+	CellPutS(NumberToString(ROUND((tRunEnd - tRunStart) * 86400)), cCube, pDeployment, 'All Items', 'Deployment Duration');
+	IF(nItems = 0);
+		sMessage = 'NOTHING TO DEPLOY';
+	ELSEIF(nFailed = 0);
+		sMessage = 'Success';
+	ELSE;
+		sMessage = NumberToString(nFailed) | ' of ' | NumberToString(nItems) | ' items failed';
+	ENDIF;
+	CellPutS(sMessage, cCube, pDeployment, 'All Items', 'Deployment Status');
+	ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', pDeployment | ': ' | sMessage);
+ENDIF;
+#EndRegion
+
+sStatus = IF(nCritical = 1, 'ERROR', 'SUCCESS');
+ExecuteProcess(cLogProc, 'pFlag', 'END', 'pProc', cProc, 'pMSG', sStatus);
+
+#endregion

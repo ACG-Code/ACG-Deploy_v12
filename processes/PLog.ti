@@ -1,0 +1,327 @@
+#region Prolog
+
+#Region ############################################# HEADER #############################################
+# Process: PLog
+# Purpose: 
+#     Master audit logging of all executed processes. Called by other TI processes at start (INIT),
+#     throughout (MSG) and at completion (END) to write to the Process Log and Process Log by User cubes.
+# Date Created: 2021-01-18 B. Cave (ACGI)
+# Last Update: 2026-09-28 C.Harvey (ACGI)
+# Notes: 
+#     2021-01-18 B. Cave (ACGI) - Initial Process Creation
+#     2026-09-28 C.Harvey (ACGI) - Fixed INIT failing on every run once any log for the process reached
+#                                  the line limit (DIMNM past the end of Process Log Line -> CellGetS on a
+#                                  blank element)
+#                                - MSG no longer errors when out of lines; it flags the log once and
+#                                  discards further messages
+#                                - INIT copy/clear now driven by the T09 line counts; T/P lines may sit
+#                                  anywhere in the dimension; consolidated line elements skipped
+#                                - User log shifted on its own content, not the main log's
+#                                - Fixed }Clients 'Name' attribute check; sUserName initialised
+#                                - Runtime shows days when longer than 24 hours
+#                                - Validation failures now write to the server log
+#EndRegion
+
+#Region ############################################# USAGE ##############################################
+# Parameters (all string):
+#     pFlag - INIT = start a fresh log for pProc (shifts prior runs down the stack)
+#             MSG  = write an audit line to the Current log
+#             END  = close out the Current log
+#     pProc - Name of the executing process being logged (must exist in }Processes)
+#     pMsg  - MSG: message text  |  END: final status (e.g. 'SUCCESS', 'FAILED: <reason>')
+#     pLine - Optional T01-T09 / P01-P09 line to write pMsg into directly (no timestamp, counter unchanged)
+#
+# Setting lines (Process Log Line):
+#     T01 Process   T02 User      T03 Start date   T04 Start time
+#     T05 End date (holds the start-time serial while running)
+#     T06 End time  T07 Runtime   T08 Status       T09 Last audit line number used
+#     P01-P09 Caller-defined parameter values
+#
+# Object assumptions:
+#     'Current' is element 1 of Process Log Run; numbered audit lines are named '1', '2', '3', ...
+#EndRegion
+
+#Region --------------- Object & process names (revise on a client-by-client basis as needed!) ---------------
+sPLogRun     = 'Process Log Run';
+sPLogLine    = 'Process Log Line';
+sPLog        = 'Process Log';
+sPLogUser    = 'Process Log by User';
+sPLogTI      = 'PLog';
+sCurrent     = 'Current';
+sOverflowTag = '*** LOG LINE LIMIT REACHED';
+
+#=== Save Start Date/Time
+nStartTime1 = NOW;
+#EndRegion
+
+#Region --------------- Validate parameters and objects ---------------
+pFlag = UPPER( TRIM( pFlag ) );
+pLine = UPPER( TRIM( pLine ) );
+
+IF( pFlag @<> 'INIT'  &  pFlag @<> 'MSG'  &  pFlag @<> 'END' );
+     LogOutput( 'ERROR', sPLogTI | ': invalid pFlag "' | pFlag | '" for process "' | pProc | '"' );
+     ProcessQuit;
+EndIF;
+
+IF( DIMIX( '}Processes', pProc ) = 0 );
+     LogOutput( 'ERROR', sPLogTI | ': process "' | pProc | '" not found in }Processes' );
+     ProcessQuit;
+EndIF;
+
+IF( ( CubeExists( sPLog ) = 0 )  %  ( CubeExists( sPLogUser ) = 0 ) );
+     LogOutput( 'ERROR', sPLogTI | ': log cube "' | sPLog | '" or "' | sPLogUser | '" is missing' );
+     ProcessQuit;
+EndIF;
+
+IF( DIMIX( sPLogRun, sCurrent ) <> 1 );
+     LogOutput( 'ERROR', sPLogTI | ': "' | sCurrent | '" must be element 1 of ' | sPLogRun );
+     ProcessQuit;
+EndIF;
+
+IF( pLine @<> '' );
+     IF( DIMIX( sPLogLine, pLine ) = 0 );
+          LogOutput( 'ERROR', sPLogTI | ': pLine "' | pLine | '" not found in ' | sPLogLine );
+          ProcessQuit;
+     EndIF;
+EndIF;
+#EndRegion
+
+#Region --------------- Get the user executing the process ---------------
+sUserName = '';
+
+IF( SUBST( TM1User(), 1, 2 ) @= 'R*' );
+     #=== Chore: TM1User() returns 'R*<ChoreName>', so log the run under the Admin ID
+     sUserID   = 'Admin';
+     sUserName = 'Admin';
+ELSE;
+     sUserID = TM1User();
+     IF( DimensionExists( '}ElementAttributes_}Clients' ) = 1 );
+          IF( DIMIX( '}ElementAttributes_}Clients', 'Name' ) > 0 );
+               sUserName = ATTRS( '}Clients', sUserID, 'Name' );
+          EndIF;
+     EndIF;
+     IF( sUserName @= '' );
+          sUserName = sUserID;
+     EndIF;
+EndIF;
+
+#=== The per-user log is skipped for Admin / chore runs
+nUserLog = 0;
+IF( sUserID @<> 'Admin' );
+     nUserLog = 1;
+EndIF;
+#EndRegion
+
+#Region ---------------  Run Type = INIT     Shift all existing logs down 1 in the stack, clear Current ---------------
+IF( pFlag @= 'INIT' );
+
+     nRunMax  = DIMSIZ( sPLogRun );
+     nLineMax = DIMSIZ( sPLogLine );
+
+     #--- Work from the oldest run up to Current: each run takes the content of the run above it,
+     #--- and Current (element 1) has no run above it, so it is cleared.
+     nRunIdx = nRunMax;
+     WHILE( nRunIdx >= 1 );
+
+          sRunTgt = DIMNM( sPLogRun, nRunIdx );
+          IF( nRunIdx > 1 );
+               sRunSrc = DIMNM( sPLogRun, nRunIdx - 1 );
+          ELSE;
+               sRunSrc = '';
+          EndIF;
+
+          #--- Main log: work is needed only if the source or the target holds a run
+          sTgtT01 = CellGetS( sPLog, pProc, sRunTgt, 'T01' );
+          nTgtCnt = StringToNumber( CellGetS( sPLog, pProc, sRunTgt, 'T09' ) );
+          sSrcT01 = '';
+          nSrcCnt = 0;
+          IF( sRunSrc @<> '' );
+               sSrcT01 = CellGetS( sPLog, pProc, sRunSrc, 'T01' );
+               nSrcCnt = StringToNumber( CellGetS( sPLog, pProc, sRunSrc, 'T09' ) );
+          EndIF;
+
+          nDoMain = 0;
+          IF( sSrcT01 @<> ''  %  sTgtT01 @<> ''  %  nSrcCnt > 0  %  nTgtCnt > 0 );
+               nDoMain = 1;
+          EndIF;
+          #--- Detail lines to touch = whichever of source / target used more lines
+          nDetailMain = nSrcCnt;
+          IF( nTgtCnt > nDetailMain );
+               nDetailMain = nTgtCnt;
+          EndIF;
+
+          #--- User log: same test, on the user log's own content
+          nDoUser     = 0;
+          nDetailUser = 0;
+          IF( nUserLog = 1 );
+               sTgtT01 = CellGetS( sPLogUser, pProc, sUserID, sRunTgt, 'T01' );
+               nTgtCnt = StringToNumber( CellGetS( sPLogUser, pProc, sUserID, sRunTgt, 'T09' ) );
+               sSrcT01 = '';
+               nSrcCnt = 0;
+               IF( sRunSrc @<> '' );
+                    sSrcT01 = CellGetS( sPLogUser, pProc, sUserID, sRunSrc, 'T01' );
+                    nSrcCnt = StringToNumber( CellGetS( sPLogUser, pProc, sUserID, sRunSrc, 'T09' ) );
+               EndIF;
+
+               IF( sSrcT01 @<> ''  %  sTgtT01 @<> ''  %  nSrcCnt > 0  %  nTgtCnt > 0 );
+                    nDoUser = 1;
+               EndIF;
+               nDetailUser = nSrcCnt;
+               IF( nTgtCnt > nDetailUser );
+                    nDetailUser = nTgtCnt;
+               EndIF;
+          EndIF;
+
+          #--- Copy (or clear) every T/P line plus the numbered lines in use
+          IF( nDoMain = 1  %  nDoUser = 1 );
+               nLineIdx = 1;
+               WHILE( nLineIdx <= nLineMax );
+                    sLine = DIMNM( sPLogLine, nLineIdx );
+
+                    IF( DTYPE( sPLogLine, sLine ) @<> 'C' );
+                         sLineType = SUBST( sLine, 1, 1 );
+                         IF( sLineType @= 'T'  %  sLineType @= 'P' );
+                              nLineNum = 0;
+                         ELSE;
+                              nLineNum = StringToNumber( sLine );
+                         EndIF;
+
+                         IF( nDoMain = 1  &  nLineNum <= nDetailMain );
+                              sData = '';
+                              IF( sRunSrc @<> '' );
+                                   sData = CellGetS( sPLog, pProc, sRunSrc, sLine );
+                              EndIF;
+                              CellPutS( sData, sPLog, pProc, sRunTgt, sLine );
+                         EndIF;
+
+                         IF( nDoUser = 1  &  nLineNum <= nDetailUser );
+                              sData = '';
+                              IF( sRunSrc @<> '' );
+                                   sData = CellGetS( sPLogUser, pProc, sUserID, sRunSrc, sLine );
+                              EndIF;
+                              CellPutS( sData, sPLogUser, pProc, sUserID, sRunTgt, sLine );
+                         EndIF;
+                    EndIF;
+
+                    nLineIdx = nLineIdx + 1;
+               END;
+          EndIF;
+
+          nRunIdx = nRunIdx - 1;
+     END;
+
+
+     #-------------------------------------------------------------------------------------------
+     # Header lines queried by admin templates
+     #-------------------------------------------------------------------------------------------
+     ExecuteProcess( sPLogTI, 'pFlag', 'MSG', 'pProc', pProc, 'pMsg', pProc, 'pLine', 'T01' );
+     ExecuteProcess( sPLogTI, 'pFlag', 'MSG', 'pProc', pProc, 'pMsg', sUserName, 'pLine', 'T02' );
+     ExecuteProcess( sPLogTI, 'pFlag', 'MSG', 'pProc', pProc, 'pMsg', TIMST( nStartTime1, '\Y-\m-\d' ), 'pLine', 'T03' );
+     ExecuteProcess( sPLogTI, 'pFlag', 'MSG', 'pProc', pProc, 'pMsg', TIMST( nStartTime1, '\h:\i:\s' ), 'pLine', 'T04' );
+     ExecuteProcess( sPLogTI, 'pFlag', 'MSG', 'pProc', pProc, 'pMsg', 'FAILED: Unknown Error', 'pLine', 'T08' );
+
+     #--- Hold the start serial in T05 (End Date) until END uses it to calculate runtime
+     ExecuteProcess( sPLogTI, 'pFlag', 'MSG', 'pProc', pProc, 'pMsg', NumberToString( nStartTime1 ), 'pLine', 'T05' );
+
+
+     #-------------------------------------------------------------------------------------------
+     # Standard first 3 lines of detail logging
+     #-------------------------------------------------------------------------------------------
+     ExecuteProcess( sPLogTI, 'pFlag', 'MSG', 'pProc', pProc, 'pMsg', 'Starting process: ' | pProc );
+     ExecuteProcess( sPLogTI, 'pFlag', 'MSG', 'pProc', pProc, 'pMsg', 'Process executed by: ' | sUserName );
+     ExecuteProcess( sPLogTI, 'pFlag', 'MSG', 'pProc', pProc, 'pMsg', '-' );
+
+     #--- End of pFlag = 'INIT'
+EndIF;
+#EndRegion
+
+#Region --------------- Run Type = MSG     Write to a setting line, or to the next audit line in Current ---------------
+IF( pFlag @= 'MSG' );
+
+     IF( pLine @<> '' );
+
+          #=== Setting line (T01-T09 / P01-P09): write as-is, no timestamp, no counter change
+          CellPutS( pMsg, sPLog, pProc, sCurrent, pLine );
+          IF( nUserLog = 1 );
+               CellPutS( pMsg, sPLogUser, pProc, sUserID, sCurrent, pLine );
+          EndIF;
+
+     ELSE;
+
+          #=== Audit line: next number after the T09 counter
+          nLastLine = StringToNumber( CellGetS( sPLog, pProc, sCurrent, 'T09' ) );
+          sNextLine = NumberToString( nLastLine + 1 );
+          sStamp    = '[' | TIMST( NOW, '\Y-\m-\d \h:\i:\s' ) | ']   ';
+
+          IF( DIMIX( sPLogLine, sNextLine ) > 0 );
+
+               CellPutS( sNextLine, sPLog, pProc, sCurrent, 'T09' );
+               CellPutS( sStamp | pMsg, sPLog, pProc, sCurrent, sNextLine );
+               IF( nUserLog = 1 );
+                    CellPutS( sNextLine, sPLogUser, pProc, sUserID, sCurrent, 'T09' );
+                    CellPutS( sStamp | pMsg, sPLogUser, pProc, sUserID, sCurrent, sNextLine );
+               EndIF;
+
+          ELSE;
+
+               #=== Out of audit lines: flag the last line once, then discard further messages.
+               #===     T01-T09 (including status and runtime) are still written by END.
+               IF( nLastLine > 0 );
+                    sLastLine = NumberToString( nLastLine );
+                    IF( SCAN( sOverflowTag, CellGetS( sPLog, pProc, sCurrent, sLastLine ) ) = 0 );
+                         sMsg = sStamp | sOverflowTag | ' (' | sLastLine | ' lines) - further messages discarded ***';
+                         CellPutS( sMsg, sPLog, pProc, sCurrent, sLastLine );
+                         IF( nUserLog = 1 );
+                              CellPutS( sMsg, sPLogUser, pProc, sUserID, sCurrent, sLastLine );
+                         EndIF;
+                    EndIF;
+               EndIF;
+
+          EndIF;
+
+     EndIF;
+
+     #--- End of pFlag = 'MSG'
+EndIF;
+#EndRegion
+
+#Region --------------- Run Type = END     Close out the Current log ---------------
+IF( pFlag @= 'END' );
+
+     #=== Retrieve the start serial held in T05 by INIT (read it before T05 is overwritten)
+     nStartTime2 = StringToNumber( CellGetS( sPLog, pProc, sCurrent, 'T05' ) );
+     nEndTime1   = NOW;
+
+     #--- Runtime (with days when longer than 24 hours)
+     IF( nStartTime2 > 0  &  nEndTime1 >= nStartTime2 );
+          nElapsed      = nEndTime1 - nStartTime2;
+          nDays         = INT( nElapsed );
+          sTotalRuntime = TIMST( nElapsed, '\hh:\im:\ss' );
+          IF( nDays > 0 );
+               sTotalRuntime = NumberToString( nDays ) | 'd ' | sTotalRuntime;
+          EndIF;
+     ELSE;
+          sTotalRuntime = 'Unknown (no INIT start time)';
+     EndIF;
+
+     #--- Closing metrics
+     ExecuteProcess( sPLogTI, 'pFlag', 'MSG', 'pProc', pProc, 'pMsg', TIMST( nEndTime1, '\Y-\m-\d' ), 'pLine', 'T05' );
+     ExecuteProcess( sPLogTI, 'pFlag', 'MSG', 'pProc', pProc, 'pMsg', TIMST( nEndTime1, '\h:\i:\s' ), 'pLine', 'T06' );
+     ExecuteProcess( sPLogTI, 'pFlag', 'MSG', 'pProc', pProc, 'pMsg', sTotalRuntime, 'pLine', 'T07' );
+
+     #--- For END only, pMsg carries the final status
+     ExecuteProcess( sPLogTI, 'pFlag', 'MSG', 'pProc', pProc, 'pMsg', pMsg, 'pLine', 'T08' );
+
+
+     #-------------------------------------------------------------------------------------------
+     # Standard last lines of audit logging
+     #-------------------------------------------------------------------------------------------
+     ExecuteProcess( sPLogTI, 'pFlag', 'MSG', 'pProc', pProc, 'pMsg', '  ' );
+     ExecuteProcess( sPLogTI, 'pFlag', 'MSG', 'pProc', pProc, 'pMsg', 'Total Runtime = ' | sTotalRuntime );
+     ExecuteProcess( sPLogTI, 'pFlag', 'MSG', 'pProc', pProc, 'pMsg', '  ' );
+     ExecuteProcess( sPLogTI, 'pFlag', 'MSG', 'pProc', pProc, 'pMsg', pProc | ' completed' );
+
+     #--- End of pFlag = 'END'
+EndIF;
+#EndRegion
+#endregion

@@ -1,0 +1,194 @@
+#region Prolog
+#Region ############################################# HEADER #############################################
+# Process: }Sys.API.Subset.Copy
+# Purpose: Copy public subsets of pDim:pHier from this database to the pTargetDB environment
+#          (create or update). Dynamic subsets keep their MDX, static subsets their element
+#          list (replaced on update); Alias is copied. Every subset is tried and failures are
+#          reported together.
+#          Returns NumericGlobalVariable('gDeployOK') and StringGlobalVariable('gDeployMsg').
+# Date Created: 2026.11.24 (ACGI)
+# Last Update: 2026.11.24
+# Notes:
+#     2026.11.24 (ACGI) - Initial Process Creation
+#     2026.11.24 (ACGI) - Process Example standard + PLOG logging
+#     2026.11.24 (ACGI) - Process Log status (T08): ERROR only for critical errors
+#EndRegion
+
+#Region --------------- Constants ---------------
+cLogProc = 'PLOG';
+cProc = GetProcessName;
+cUser = NumberToString(DIMIX('}Clients', TM1USER));
+cTimestamp = TIMST(now, '\Y\m\d\h\i\s');
+cRandomInt = NumberToString(INT(RAND() * 1005));
+cView = '%cProc%.%cUser%.%cTimestamp%.%cRandomInt%';
+cTemp = 1;
+NumericGlobalVariable('gHttpCode');
+StringGlobalVariable('gHttpBody');
+StringGlobalVariable('gEnc');
+NumericGlobalVariable('gDeployOK');
+StringGlobalVariable('gDeployMsg');
+#EndRegion
+
+#Region --------------- Initialize Logging ---------------
+ExecuteProcess(cLogProc, 'pFlag', 'INIT', 'pProc', cProc);
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pDim=' | pDim, 'pLine', 'P01');
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pHier=' | pHier, 'pLine', 'P02');
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pSubsets=' | pSubsets, 'pLine', 'P03');
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pTargetDB=' | pTargetDB, 'pLine', 'P04');
+#EndRegion
+
+#Region --------------- Error Handling ---------------
+nError = 0;
+nCritical = 0;
+sMessage = '';
+sResult = '';
+
+IF(pDim @= '' % DimensionExists(pDim) = 0);
+	nError = 1;
+	sMessage = 'pDim: "' | pDim | '" not found';
+ELSEIF(pTargetDB @= '');
+	nError = 1;
+	sMessage = 'pTargetDB is required';
+ENDIF;
+
+IF(nError = 1);
+	ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', sMessage);
+	ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Critical errors, exiting');
+	nCritical = 1;
+	ProcessBreak;
+ENDIF;
+#EndRegion
+
+#Region --------------- Variables ---------------
+sHier = IF(pHier @= '', pDim, pHier);
+ExecuteProcess('}Sys.API.Encode', 'pText', pDim, 'pMode', 'key');
+sDimKey = gEnc;
+ExecuteProcess('}Sys.API.Encode', 'pText', sHier, 'pMode', 'key');
+sHierKey = gEnc;
+ExecuteProcess('}Sys.API.Encode', 'pText', pDim, 'pMode', 'bind');
+sDimLit = gEnc;
+ExecuteProcess('}Sys.API.Encode', 'pText', sHier, 'pMode', 'bind');
+sHierLit = gEnc;
+sSubBase = '/Dimensions(''' | sDimKey | ''')/Hierarchies(''' | sHierKey | ''')/Subsets';
+nNew = 0;
+nUpd = 0;
+sFail = '';
+#EndRegion
+
+#Region --------------- Subsets to copy (Char(1)-separated) ---------------
+sList = '';
+IF(pSubsets @= '');
+	ExecuteProcess('}Sys.API.Request', 'pDB', '', 'pMethod', 'GET', 'pPath', sSubBase | '?$select=Name');
+	IF(gHttpCode <> 200);
+		nError = 1;
+		sMessage = 'subset list failed (HTTP ' | NumberToString(gHttpCode) | '): ' | gHttpBody;
+		ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', sMessage);
+		ProcessBreak;
+	ENDIF;
+	sResp = gHttpBody;
+	nPos = SCAN('"Name":"', sResp);
+	WHILE(nPos > 0);
+		sResp = SUBST(sResp, nPos + 8, LONG(sResp) - nPos - 7);
+		nEnd = SCAN('"', sResp);
+		sList = sList | SUBST(sResp, 1, nEnd - 1) | Char(1);
+		sResp = SUBST(sResp, nEnd + 1, LONG(sResp) - nEnd);
+		nPos = SCAN('"Name":"', sResp);
+	END;
+ELSE;
+	sRest = pSubsets | ';';
+	nPos = SCAN(';', sRest);
+	WHILE(nPos > 0);
+		sOne = TRIM(SUBST(sRest, 1, nPos - 1));
+		IF(sOne @<> '');
+			sList = sList | sOne | Char(1);
+		ENDIF;
+		sRest = SUBST(sRest, nPos + 1, LONG(sRest) - nPos);
+		nPos = SCAN(';', sRest);
+	END;
+ENDIF;
+#EndRegion
+
+#Region --------------- Copy each subset ---------------
+nPos = SCAN(Char(1), sList);
+WHILE(nPos > 0);
+	sSub = SUBST(sList, 1, nPos - 1);
+	sList = SUBST(sList, nPos + 1, LONG(sList) - nPos);
+
+	ExecuteProcess('}Sys.API.Encode', 'pText', sSub, 'pMode', 'key');
+	sSubURL = sSubBase | '(''' | gEnc | ''')';
+	ExecuteProcess('}Sys.API.Encode', 'pText', sSub, 'pMode', 'json');
+	sSubJs = gEnc;
+
+	IF(HierarchySubsetExists(pDim, sHier, sSub) = 0);
+		sFail = sFail | IF(sFail @= '', '', '; ') | sSub | ': not found on source';
+		ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', sSub | ': not found on source');
+	ELSE;
+		sMDX = HierarchySubsetMDXGet(pDim, sHier, sSub);
+		sAlias = HierarchySubsetAliasGet(pDim, sHier, sSub);
+		IF(sMDX @<> '');
+			ExecuteProcess('}Sys.API.Encode', 'pText', sMDX, 'pMode', 'json');
+			sCore = '"Expression":"' | gEnc | '"';
+			sKind = 'dynamic';
+		ELSE;
+			sBind = '';
+			nS = HierarchySubsetGetSize(pDim, sHier, sSub);
+			nJ = 1;
+			WHILE(nJ <= nS);
+				sE = HierarchySubsetGetElementName(pDim, sHier, sSub, nJ);
+				IF(SCAN('''', sE) > 0 % SCAN('"', sE) > 0 % SCAN('\', sE) > 0);
+					ExecuteProcess('}Sys.API.Encode', 'pText', sE, 'pMode', 'bind');
+					sE = gEnc;
+				ENDIF;
+				sBind = sBind | IF(nJ > 1, ',', '') | '"Dimensions(''' | sDimLit | ''')/Hierarchies(''' | sHierLit | ''')/Elements(''' | sE | ''')"';
+				nJ = nJ + 1;
+			END;
+			sCore = '"Elements@odata.bind":[' | sBind | ']';
+			sKind = 'static';
+		ENDIF;
+		IF(sAlias @<> '');
+			ExecuteProcess('}Sys.API.Encode', 'pText', sAlias, 'pMode', 'json');
+			sCore = sCore | ',"Alias":"' | gEnc | '"';
+		ENDIF;
+
+		ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'GET', 'pPath', sSubURL | '?$select=Name');
+		IF(gHttpCode = 200);
+			IF(sKind @= 'static');
+				ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'DELETE', 'pPath', sSubURL | '/Elements/$ref');
+			ENDIF;
+			ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'PATCH', 'pPath', sSubURL, 'pBody', '{' | sCore | '}');
+			sAction = 'updated';
+		ELSE;
+			ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'POST', 'pPath', sSubBase, 'pBody', '{"Name":"' | sSubJs | '",' | sCore | '}');
+			sAction = 'created';
+		ENDIF;
+		ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', sSub | ': ' | sKind | ' ' | sAction | ' HTTP ' | NumberToString(gHttpCode));
+		IF(gHttpCode < 200 % gHttpCode > 299);
+			sFail = sFail | IF(sFail @= '', '', '; ') | sSub | ': HTTP ' | NumberToString(gHttpCode) | ' ' | gHttpBody;
+		ELSEIF(sAction @= 'created');
+			nNew = nNew + 1;
+		ELSE;
+			nUpd = nUpd + 1;
+		ENDIF;
+	ENDIF;
+	nPos = SCAN(Char(1), sList);
+END;
+
+sResult = NumberToString(nNew) | ' created, ' | NumberToString(nUpd) | ' updated';
+IF(sFail @<> '');
+	nError = 1;
+	sMessage = sResult | ' - failed: ' | sFail;
+ENDIF;
+#EndRegion
+
+#endregion
+#region Epilog
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Beginning Epilog');
+
+gDeployOK = IF(nError = 1, 0, 1);
+gDeployMsg = IF(nError = 1, sMessage, sResult);
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', gDeployMsg);
+
+sStatus = IF(nCritical = 1, 'ERROR', 'SUCCESS');
+ExecuteProcess(cLogProc, 'pFlag', 'END', 'pProc', cProc, 'pMSG', sStatus);
+
+#endregion

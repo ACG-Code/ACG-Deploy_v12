@@ -1,0 +1,34 @@
+{
+	"@type":"Process",
+	"Name":"}Sys.API.Exec.TI",
+	"HasSecurityAccess":false,
+	"Code@Code.link":"}Sys.API.Exec.TI.ti",
+	"DataSource":
+	{
+		"Type":"None"
+	},
+	"Parameters":
+	[
+		{
+			"Name":"pDB",
+			"Prompt":"Database to run the code on",
+			"Value":"",
+			"Type":"String"
+		},
+		{
+			"Name":"pCode",
+			"Prompt":"TI code to run as the Prolog of a temporary (unsaved) process",
+			"Value":"",
+			"Type":"String"
+		},
+		{
+			"Name":"pLog",
+			"Prompt":"1 = log to Raw_Reports/Sys.API.Exec.TI.md",
+			"Value":0,
+			"Type":"Numeric"
+		}
+	],
+	"Variables":[],
+	"UIData": "CubeAction=1511\fDataAction=1503\fCubeLogChanges=0\f",
+	"VariablesUIData": []
+}

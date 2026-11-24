@@ -1,0 +1,188 @@
+#region Prolog
+#Region ############################################# HEADER #############################################
+# Process: }Sys.API.View.Copy
+# Purpose: Copy a public view from this database to the pTargetDB environment (replaced if
+#          it exists). The cube must already exist on the target.
+#            MDX view    : MDX copied as is
+#            Native view : axes rebuilt by }Sys.API.View.Axis; named subsets used by the
+#                          view are copied to the target first (}Sys.API.Subset.Copy);
+#                          suppress-zero flags and format string kept
+#          Returns NumericGlobalVariable('gDeployOK') and StringGlobalVariable('gDeployMsg').
+# Date Created: 2026.11.24 (ACGI)
+# Last Update: 2026.11.24
+# Notes:
+#     2026.11.24 (ACGI) - Initial Process Creation
+#     2026.11.24 (ACGI) - Process Example standard + PLOG logging
+#     2026.11.24 (ACGI) - Process Log status (T08): ERROR only for critical errors
+#EndRegion
+
+#Region --------------- Constants ---------------
+cLogProc = 'PLOG';
+cProc = GetProcessName;
+cUser = NumberToString(DIMIX('}Clients', TM1USER));
+cTimestamp = TIMST(now, '\Y\m\d\h\i\s');
+cRandomInt = NumberToString(INT(RAND() * 1005));
+cView = '%cProc%.%cUser%.%cTimestamp%.%cRandomInt%';
+cTemp = 1;
+cSubExp = '?$expand=Subset($select=Name,Expression;$expand=Hierarchy($select=Name;$expand=Dimension($select=Name)),Elements($select=Name))';
+NumericGlobalVariable('gHttpCode');
+StringGlobalVariable('gHttpBody');
+StringGlobalVariable('gEnc');
+StringGlobalVariable('gAxis');
+StringGlobalVariable('gAxisErr');
+NumericGlobalVariable('gDeployOK');
+StringGlobalVariable('gDeployMsg');
+#EndRegion
+
+#Region --------------- Initialize Logging ---------------
+ExecuteProcess(cLogProc, 'pFlag', 'INIT', 'pProc', cProc);
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pCube=' | pCube, 'pLine', 'P01');
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pView=' | pView, 'pLine', 'P02');
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pTargetDB=' | pTargetDB, 'pLine', 'P03');
+#EndRegion
+
+#Region --------------- Error Handling ---------------
+nError = 0;
+nCritical = 0;
+sMessage = '';
+sResult = '';
+
+IF(pCube @= '' % pView @= '' % pTargetDB @= '');
+	nError = 1;
+	sMessage = 'pCube, pView and pTargetDB are required';
+ELSEIF(CubeExists(pCube) = 0);
+	nError = 1;
+	sMessage = 'pCube: "' | pCube | '" not found on source';
+ENDIF;
+
+IF(nError = 1);
+	ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', sMessage);
+	ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Critical errors, exiting');
+	nCritical = 1;
+	ProcessBreak;
+ENDIF;
+#EndRegion
+
+#Region --------------- Variables ---------------
+ExecuteProcess('}Sys.API.Encode', 'pText', pCube, 'pMode', 'key');
+sCubePath = '/Cubes(''' | gEnc | ''')';
+ExecuteProcess('}Sys.API.Encode', 'pText', pView, 'pMode', 'key');
+sViewPath = sCubePath | '/Views(''' | gEnc | ''')';
+ExecuteProcess('}Sys.API.Encode', 'pText', pView, 'pMode', 'json');
+sViewJs = gEnc;
+#EndRegion
+
+#Region --------------- Source view and target cube ---------------
+ExecuteProcess('}Sys.API.Request', 'pDB', '', 'pMethod', 'GET', 'pPath', sViewPath);
+IF(gHttpCode <> 200);
+	nError = 1;
+	sMessage = 'view not found on source (HTTP ' | NumberToString(gHttpCode) | ')';
+	ProcessBreak;
+ENDIF;
+sSrc = gHttpBody;
+
+ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'GET', 'pPath', sCubePath | '?$select=Name');
+IF(gHttpCode <> 200);
+	nError = 1;
+	sMessage = 'cube does not exist on target (HTTP ' | NumberToString(gHttpCode) | ')';
+	ProcessBreak;
+ENDIF;
+#EndRegion
+
+#Region --------------- Build POST body ---------------
+IF(SCAN('MDXView', sSrc) > 0);
+	sKind = 'MDX';
+	nQ = SCAN('"MDX":"', sSrc);
+	sS = SUBST(sSrc, nQ + 7, LONG(sSrc) - nQ - 6);
+	nE = 1;
+	nEsc = 0;
+	WHILE(nE <= LONG(sS));
+		sC = SUBST(sS, nE, 1);
+		IF(nEsc = 1);
+			nEsc = 0;
+		ELSEIF(sC @= '\');
+			nEsc = 1;
+		ELSEIF(sC @= '"');
+			BREAK;
+		ENDIF;
+		nE = nE + 1;
+	END;
+	sBody = '{"@odata.type":"ibm.tm1.api.v1.MDXView","Name":"' | sViewJs | '","MDX":"' | SUBST(sS, 1, nE - 1) | '"}';
+ELSE;
+	sKind = 'native';
+	sFail = '';
+	ExecuteProcess('}Sys.API.Request', 'pDB', '', 'pMethod', 'GET', 'pPath', sViewPath | '/tm1.NativeView/Columns' | cSubExp);
+	ExecuteProcess('}Sys.API.View.Axis', 'pBody', gHttpBody, 'pTargetDB', pTargetDB, 'pTitles', 0);
+	sCols = gAxis;
+	sFail = gAxisErr;
+	ExecuteProcess('}Sys.API.Request', 'pDB', '', 'pMethod', 'GET', 'pPath', sViewPath | '/tm1.NativeView/Rows' | cSubExp);
+	ExecuteProcess('}Sys.API.View.Axis', 'pBody', gHttpBody, 'pTargetDB', pTargetDB, 'pTitles', 0);
+	sRows = gAxis;
+	sFail = sFail | IF(sFail @<> '' & gAxisErr @<> '', '; ', '') | gAxisErr;
+	ExecuteProcess('}Sys.API.Request', 'pDB', '', 'pMethod', 'GET', 'pPath', sViewPath | '/tm1.NativeView/Titles' | cSubExp | ',Selected($select=Name)');
+	ExecuteProcess('}Sys.API.View.Axis', 'pBody', gHttpBody, 'pTargetDB', pTargetDB, 'pTitles', 1);
+	sTitles = gAxis;
+	sFail = sFail | IF(sFail @<> '' & gAxisErr @<> '', '; ', '') | gAxisErr;
+	IF(sFail @<> '');
+		nError = 1;
+		sMessage = sFail;
+		ProcessBreak;
+	ENDIF;
+
+	# suppress flags and format string from the base view
+	sSupC = IF(SCAN('"SuppressEmptyColumns":true', sSrc) > 0, 'true', 'false');
+	sSupR = IF(SCAN('"SuppressEmptyRows":true', sSrc) > 0, 'true', 'false');
+	sFmt = '';
+	nQ = SCAN('"FormatString":"', sSrc);
+	IF(nQ > 0);
+		sS = SUBST(sSrc, nQ + 16, LONG(sSrc) - nQ - 15);
+		nE = 1;
+		nEsc = 0;
+		WHILE(nE <= LONG(sS));
+			sC = SUBST(sS, nE, 1);
+			IF(nEsc = 1);
+				nEsc = 0;
+			ELSEIF(sC @= '\');
+				nEsc = 1;
+			ELSEIF(sC @= '"');
+				BREAK;
+			ENDIF;
+			nE = nE + 1;
+		END;
+		sFmt = ',"FormatString":"' | SUBST(sS, 1, nE - 1) | '"';
+	ENDIF;
+	sBody = '{"@odata.type":"ibm.tm1.api.v1.NativeView","Name":"' | sViewJs | '","Columns":' | sCols
+		| ',"Rows":' | sRows | ',"Titles":' | sTitles
+		| ',"SuppressEmptyColumns":' | sSupC | ',"SuppressEmptyRows":' | sSupR | sFmt | '}';
+ENDIF;
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', sKind | ' view, body ' | NumberToString(LONG(sBody)) | ' chars');
+#EndRegion
+
+#Region --------------- Replace on target ---------------
+ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'GET', 'pPath', sViewPath | '?$select=Name');
+sAction = 'created';
+IF(gHttpCode = 200);
+	ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'DELETE', 'pPath', sViewPath);
+	sAction = 'replaced';
+ENDIF;
+ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'POST', 'pPath', sCubePath | '/Views', 'pBody', sBody);
+IF(gHttpCode < 200 % gHttpCode > 299);
+	nError = 1;
+	sMessage = sKind | ' view ' | sAction | ' failed (HTTP ' | NumberToString(gHttpCode) | '): ' | gHttpBody;
+ELSE;
+	sResult = sKind | ' view ' | sAction;
+ENDIF;
+#EndRegion
+
+#endregion
+#region Epilog
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Beginning Epilog');
+
+gDeployOK = IF(nError = 1, 0, 1);
+gDeployMsg = IF(nError = 1, sMessage, sResult);
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', gDeployMsg);
+
+sStatus = IF(nCritical = 1, 'ERROR', 'SUCCESS');
+ExecuteProcess(cLogProc, 'pFlag', 'END', 'pProc', cProc, 'pMSG', sStatus);
+
+#endregion
