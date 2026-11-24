@@ -2,17 +2,24 @@
 #Region ############################################# HEADER #############################################
 # Process: }Sys.Deploy.Setup.Rules
 # Purpose: Step 2 of the deployment model setup - run AFTER }Sys.Deploy.Setup has finished
-#          (the cubes must be committed). Safe to re-run.
-#          Sets the Deployment cube and picklist rules over REST, checks them, and creates
-#          the Deploy_Admin / Deploy_User groups if missing.
+#          (the cubes must be committed) AND this database's connection values are set
+#          (Base URL, Database Name, Tenant ID, API Key). Safe to re-run.
+#          Sets the Deployment and }PickList_Deployment rules and creates the Deploy_Admin /
+#          Deploy_User groups if missing.
+#          Rule and group changes go to this same database over REST, so they are sent
+#          ASYNC: a synchronous call would wait on this process's own open transaction until it
+#          times out (HTTP 520). They are applied as soon as this process commits.
 #          Groups are checked over REST, not with local }Groups functions: a local read would
-#          lock }Groups and block this process's own REST create call.
+#          lock }Groups and block the create.
 # Date Created: 2026.11.24 (ACGI)
 # Last Update: 2026.11.24
 # Notes:
 #     2026.11.24 (ACGI) - Initial Process Creation
 #     2026.11.24 (ACGI) - Process Example standard + PLOG logging; rule errors fail the run
 #     2026.11.24 (ACGI) - Process Log status (T08): ERROR only for critical errors
+#     2026.11.24 (ACGI) - Missing connection values = critical error; group exists only on HTTP 200
+#     2026.11.24 (ACGI) - Async rule/group calls; }PickList_Deployment Environments removed
+#     2026.11.24 (ACGI) - Owner kept (informational): enterable on All Items and on each item
 #EndRegion
 
 #Region --------------- Constants ---------------
@@ -25,8 +32,11 @@ cView = '%cProc%.%cUser%.%cTimestamp%.%cRandomInt%';
 cTemp = 1;
 cNL = Char(10);
 cItemDB = 'DB(''Deployment'', !Deployments, !Deployment - Items, ''Type'')';
+cAdm = 'System - Admin Parameters';
+cAPI = '}API Control';
 NumericGlobalVariable('gHttpCode');
 StringGlobalVariable('gHttpBody');
+StringGlobalVariable('gHttpLocation');
 StringGlobalVariable('gEnc');
 #EndRegion
 
@@ -40,9 +50,27 @@ nCritical = 0;
 sMessage = '';
 sFail = '';
 
-IF(CubeExists('Deployment') = 0 % CubeExists('}PickList_Deployment') = 0 % CubeExists('}PickList_Deployment Environments') = 0);
+IF(CubeExists('Deployment') = 0 % CubeExists('}PickList_Deployment') = 0 % CubeExists(cAdm) = 0 % CubeExists(cAPI) = 0);
 	nError = 1;
 	sMessage = 'deployment cubes missing - run }Sys.Deploy.Setup first';
+ELSE;
+	sMissing = '';
+	IF(CellGetS(cAdm, 'Base URL', 'String') @= '');
+		sMissing = sMissing | ' Base URL';
+	ENDIF;
+	IF(CellGetS(cAdm, 'Database Name', 'String') @= '');
+		sMissing = sMissing | ' Database Name';
+	ENDIF;
+	IF(CellGetS(cAPI, 'Tenant ID', 'String') @= '');
+		sMissing = sMissing | ' Tenant ID';
+	ENDIF;
+	IF(CellGetS(cAPI, 'API Key', 'String') @= '');
+		sMissing = sMissing | ' API Key';
+	ENDIF;
+	IF(sMissing @<> '');
+		nError = 1;
+		sMessage = 'connection values missing:' | sMissing | ' - run }Sys.Deploy.Setup with pThisDB, pBaseURL, pTenantID and pApiKey, then run this process again';
+	ENDIF;
 ENDIF;
 
 IF(nError = 1);
@@ -55,7 +83,7 @@ ENDIF;
 
 #Region --------------- Deployment rules ---------------
 sR = 'SKIPCHECK;' | cNL | 'FEEDSTRINGS;' | cNL | cNL
-	| '# All Items holds the deployment-level values' | cNL
+	| '# All Items holds the deployment-level values (Owner is informational)' | cNL
 	| '[''Deployment - Items'':''All Items'', ''mDeployments'':{''Name'', ''Owner'', ''Source'', ''Active'', ''Deployment Status'', ''Deployment Start'', ''Deployment End'', ''Deployment Duration''}] = S: STET;' | cNL
 	| '[''Deployment - Items'':''All Items''] = S: '''';' | cNL | cNL
 	| '# Source is set once per deployment (All Items)' | cNL
@@ -68,14 +96,10 @@ sR = 'SKIPCHECK;' | cNL | 'FEEDSTRINGS;' | cNL | cNL
 	| '  IF(' | cItemDB | ' @<> ''RunTI'', '''', STET);' | cNL | cNL
 	| 'FEEDERS;' | cNL;
 ExecuteProcess('}Sys.API.Encode', 'pText', sR, 'pMode', 'json');
-ExecuteProcess('}Sys.API.Request', 'pDB', '', 'pMethod', 'PATCH', 'pPath', '/Cubes(''Deployment'')', 'pBody', '{"Rules":"' | gEnc | '"}');
-ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Deployment rules HTTP ' | NumberToString(gHttpCode));
-IF(gHttpCode < 200 % gHttpCode > 299);
+ExecuteProcess('}Sys.API.Request', 'pDB', '', 'pMethod', 'PATCH', 'pPath', '/Cubes(''Deployment'')', 'pBody', '{"Rules":"' | gEnc | '"}', 'pAsync', 1);
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Deployment rules queued HTTP ' | NumberToString(gHttpCode));
+IF(gHttpCode <> 202);
 	sFail = sFail | IF(sFail @= '', '', '; ') | 'Deployment rules HTTP ' | NumberToString(gHttpCode);
-ENDIF;
-ExecuteProcess('}Sys.API.Request', 'pDB', '', 'pMethod', 'POST', 'pPath', '/Cubes(''Deployment'')/tm1.CheckRules', 'pBody', '{}');
-IF(SCAN('"LineNumber"', gHttpBody) > 0);
-	sFail = sFail | IF(sFail @= '', '', '; ') | 'Deployment rule errors: ' | gHttpBody;
 ENDIF;
 #EndRegion
 
@@ -89,24 +113,10 @@ sR = '[''mDeployments'':{''Active'', ''Include Attribute Values'', ''Copy Attrib
 	| '  IF(' | cItemDB | ' @= ''Process'' % ' | cItemDB | ' @= ''RunTI'', ''Dimension:}Processes'',' | cNL
 	| '  IF(' | cItemDB | ' @= ''Chore'', ''Dimension:}Chores'', ''''))));' | cNL;
 ExecuteProcess('}Sys.API.Encode', 'pText', sR, 'pMode', 'json');
-ExecuteProcess('}Sys.API.Request', 'pDB', '', 'pMethod', 'PATCH', 'pPath', '/Cubes(''%7DPickList_Deployment'')', 'pBody', '{"Rules":"' | gEnc | '"}');
-ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', '}PickList_Deployment rules HTTP ' | NumberToString(gHttpCode));
-IF(gHttpCode < 200 % gHttpCode > 299);
+ExecuteProcess('}Sys.API.Request', 'pDB', '', 'pMethod', 'PATCH', 'pPath', '/Cubes(''%7DPickList_Deployment'')', 'pBody', '{"Rules":"' | gEnc | '"}', 'pAsync', 1);
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', '}PickList_Deployment rules queued HTTP ' | NumberToString(gHttpCode));
+IF(gHttpCode <> 202);
 	sFail = sFail | IF(sFail @= '', '', '; ') | '}PickList_Deployment rules HTTP ' | NumberToString(gHttpCode);
-ENDIF;
-ExecuteProcess('}Sys.API.Request', 'pDB', '', 'pMethod', 'POST', 'pPath', '/Cubes(''%7DPickList_Deployment'')/tm1.CheckRules', 'pBody', '{}');
-IF(SCAN('"LineNumber"', gHttpBody) > 0);
-	sFail = sFail | IF(sFail @= '', '', '; ') | '}PickList_Deployment rule errors: ' | gHttpBody;
-ENDIF;
-#EndRegion
-
-#Region --------------- }PickList_Deployment Environments rules ---------------
-sR = '[''mDeployment-Environments'':''Reporting Instance'', ''}PickList'':''Value''] = S: ''Static:Yes:No'';' | cNL;
-ExecuteProcess('}Sys.API.Encode', 'pText', sR, 'pMode', 'json');
-ExecuteProcess('}Sys.API.Request', 'pDB', '', 'pMethod', 'PATCH', 'pPath', '/Cubes(''%7DPickList_Deployment%20Environments'')', 'pBody', '{"Rules":"' | gEnc | '"}');
-ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', '}PickList_Deployment Environments rules HTTP ' | NumberToString(gHttpCode));
-IF(gHttpCode < 200 % gHttpCode > 299);
-	sFail = sFail | IF(sFail @= '', '', '; ') | '}PickList_Deployment Environments rules HTTP ' | NumberToString(gHttpCode);
 ENDIF;
 #EndRegion
 
@@ -117,14 +127,17 @@ WHILE(nPos > 0);
 	sG = SUBST(sList, 1, nPos - 1);
 	sList = SUBST(sList, nPos + 1, LONG(sList) - nPos);
 	ExecuteProcess('}Sys.API.Request', 'pDB', '', 'pMethod', 'GET', 'pPath', '/Groups(''' | sG | ''')?$select=Name');
-	IF(gHttpCode = 404);
-		ExecuteProcess('}Sys.API.Request', 'pDB', '', 'pMethod', 'POST', 'pPath', '/Groups', 'pBody', '{"Name":"' | sG | '"}');
-		ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Group ' | sG | ' created HTTP ' | NumberToString(gHttpCode));
-		IF(gHttpCode < 200 % gHttpCode > 299);
-			sFail = sFail | IF(sFail @= '', '', '; ') | 'group ' | sG | ': ' | gHttpBody;
+	IF(gHttpCode = 200);
+		ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Group ' | sG | ' exists');
+	ELSEIF(gHttpCode = 404);
+		ExecuteProcess('}Sys.API.Request', 'pDB', '', 'pMethod', 'POST', 'pPath', '/Groups', 'pBody', '{"Name":"' | sG | '"}', 'pAsync', 1);
+		ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Group ' | sG | ' create queued HTTP ' | NumberToString(gHttpCode));
+		IF(gHttpCode <> 202);
+			sFail = sFail | IF(sFail @= '', '', '; ') | 'group ' | sG | ': HTTP ' | NumberToString(gHttpCode);
 		ENDIF;
 	ELSE;
-		ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Group ' | sG | ' exists');
+		sFail = sFail | IF(sFail @= '', '', '; ') | 'group ' | sG | ' check HTTP ' | NumberToString(gHttpCode);
+		ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Group ' | sG | ' check failed HTTP ' | NumberToString(gHttpCode));
 	ENDIF;
 	nPos = SCAN('|', sList);
 END;
@@ -139,7 +152,8 @@ ENDIF;
 #region Epilog
 ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Beginning Epilog');
 
-ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', IF(nError = 1, sMessage, 'rules set and checked, groups ok'));
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG',
+	IF(nError = 1, sMessage, 'rules and groups queued - applied when this process commits'));
 
 sStatus = IF(nCritical = 1, 'ERROR', 'SUCCESS');
 ExecuteProcess(cLogProc, 'pFlag', 'END', 'pProc', cProc, 'pMSG', sStatus);

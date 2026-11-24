@@ -4,17 +4,15 @@
 # Purpose: Install / complete the deployment system on this database. Safe to re-run: existing
 #          objects and values are kept, missing ones are added.
 #            Prerequisites: Process Log cubes (runs 'PLog - Build' if missing),
-#                           System - Admin Parameters (Base URL, Database Name, ...),
+#                           System - Admin Parameters (Base URL, Database Name, process_timeout),
 #                           }API Control (Tenant ID, API Key)
 #            Dimensions : Deployments, Deployment - Items, mDeployments,
 #                         Deployment-Environments, mDeployment-Environments
-#            Cubes      : Deployment, Deployment Environments,
-#                         }PickList_Deployment, }PickList_Deployment Environments
-#            Settings   : System - Admin Parameters > Deployment Parameters
-#                         (max_workers, process_timeout); this tenant's connection values from
+#            Cubes      : Deployment, Deployment Environments, }PickList_Deployment
+#            Settings   : process_timeout default; this tenant's connection values from
 #                         pThisDB / pBaseURL / pTenantID / pApiKey (blank = keep)
-#          Run }Sys.Deploy.Setup.Rules afterwards (rules + groups). It is not started from
-#          here: in v12 a child process holds up this process's commit.
+#          Then run }Sys.Deploy.Setup.Rules (rules + groups) once the connection values are set.
+#          It is not started from here: in v12 a child process holds up this process's commit.
 #          The API key is never logged.
 # Date Created: 2026.11.24 (ACGI)
 # Last Update: 2026.11.24
@@ -24,6 +22,9 @@
 #     2026.11.24 (ACGI) - Process Example standard + PLOG logging
 #     2026.11.24 (ACGI) - Creates its prerequisites for a fresh client install
 #     2026.11.24 (ACGI) - Process Log status (T08): ERROR only for critical errors
+#     2026.11.24 (ACGI) - Unused measures removed (Reporting Instance, Address, Server Name,
+#                         Database Type, max_workers) and }PickList_Deployment Environments
+#     2026.11.24 (ACGI) - Owner kept in mDeployments (informational, not used by the processes)
 #EndRegion
 
 #Region --------------- Constants ---------------
@@ -87,7 +88,7 @@ ENDIF;
 IF(DimensionElementExists(cAdm, 'Environment Parameters') = 0);
 	DimensionElementInsertDirect(cAdm, '', 'Environment Parameters', 'C');
 ENDIF;
-sList = 'Base URL|Database Type|Database Name|';
+sList = 'Base URL|Database Name|';
 nPos = SCAN('|', sList);
 WHILE(nPos > 0);
 	sEl = SUBST(sList, 1, nPos - 1);
@@ -98,6 +99,13 @@ WHILE(nPos > 0);
 	ENDIF;
 	nPos = SCAN('|', sList);
 END;
+IF(DimensionElementExists(cAdm, 'Deployment Parameters') = 0);
+	DimensionElementInsertDirect(cAdm, '', 'Deployment Parameters', 'C');
+ENDIF;
+IF(DimensionElementExists(cAdm, 'process_timeout') = 0);
+	DimensionElementInsertDirect(cAdm, '', 'process_timeout', 'N');
+	DimensionElementComponentAddDirect(cAdm, 'Deployment Parameters', 'process_timeout', 1);
+ENDIF;
 IF(DimensionExists(cAdmMeas) = 0);
 	DimensionCreate(cAdmMeas);
 ENDIF;
@@ -166,7 +174,7 @@ WHILE(nI <= 49);
 	nI = nI + 1;
 END;
 
-# mDeployments (all string measures)
+# mDeployments (all string measures; Owner is informational only)
 sDim = 'mDeployments';
 IF(DimensionExists(sDim) = 0);
 	DimensionCreate(sDim);
@@ -180,7 +188,9 @@ WHILE(nPos > 0);
 	sEl = SUBST(sList, 1, nPos - 1);
 	sList = SUBST(sList, nPos + 1, LONG(sList) - nPos);
 	IF(DimensionElementExists(sDim, sEl) = 0);
-		DimensionElementInsertDirect(sDim, '', sEl, 'S');
+		# Owner added to an existing dimension goes before Source, not at the end
+		sIns = IF(sEl @= 'Owner' & DimensionElementExists(sDim, 'Source') = 1, 'Source', '');
+		DimensionElementInsertDirect(sDim, sIns, sEl, 'S');
 	ENDIF;
 	nPos = SCAN('|', sList);
 END;
@@ -207,30 +217,13 @@ sDim = 'mDeployment-Environments';
 IF(DimensionExists(sDim) = 0);
 	DimensionCreate(sDim);
 ENDIF;
-sList = 'Database Name|Reporting Instance|Address|Server Name|Tenant ID|Base URL|Secret|';
+sList = 'Database Name|Tenant ID|Base URL|Secret|';
 nPos = SCAN('|', sList);
 WHILE(nPos > 0);
 	sEl = SUBST(sList, 1, nPos - 1);
 	sList = SUBST(sList, nPos + 1, LONG(sList) - nPos);
 	IF(DimensionElementExists(sDim, sEl) = 0);
 		DimensionElementInsertDirect(sDim, '', sEl, 'S');
-	ENDIF;
-	nPos = SCAN('|', sList);
-END;
-
-# System - Admin Parameters: Deployment Parameters
-sDim = cAdm;
-IF(DimensionElementExists(sDim, 'Deployment Parameters') = 0);
-	DimensionElementInsertDirect(sDim, '', 'Deployment Parameters', 'C');
-ENDIF;
-sList = 'max_workers|process_timeout|';
-nPos = SCAN('|', sList);
-WHILE(nPos > 0);
-	sEl = SUBST(sList, 1, nPos - 1);
-	sList = SUBST(sList, nPos + 1, LONG(sList) - nPos);
-	IF(DimensionElementExists(sDim, sEl) = 0);
-		DimensionElementInsertDirect(sDim, '', sEl, 'N');
-		DimensionElementComponentAddDirect(sDim, 'Deployment Parameters', sEl, 1);
 	ENDIF;
 	nPos = SCAN('|', sList);
 END;
@@ -252,9 +245,6 @@ ENDIF;
 IF(CubeExists('}PickList_Deployment') = 0);
 	CubeCreate('}PickList_Deployment', 'Deployments', 'Deployment - Items', 'mDeployments', '}PickList');
 ENDIF;
-IF(CubeExists('}PickList_Deployment Environments') = 0);
-	CubeCreate('}PickList_Deployment Environments', 'Deployment-Environments', 'mDeployment-Environments', '}PickList');
-ENDIF;
 ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Cubes ok');
 #EndRegion
 
@@ -273,9 +263,6 @@ IF(pBaseURL @<> '');
 	END;
 	CellPutS(sURL, cAdm, 'Base URL', 'String');
 ENDIF;
-IF(CellGetS(cAdm, 'Database Type', 'String') @= '');
-	CellPutS('PA SaaS', cAdm, 'Database Type', 'String');
-ENDIF;
 IF(pTenantID @<> '');
 	CellPutS(pTenantID, cAPI, 'Tenant ID', 'String');
 ENDIF;
@@ -286,18 +273,12 @@ ENDIF;
 #EndRegion
 
 #Region --------------- Default settings (only if blank) ---------------
-IF(CellGetS(cAdm, 'max_workers', 'String') @= '');
-	CellPutS('10', cAdm, 'max_workers', 'String');
-ENDIF;
 IF(CellGetS(cAdm, 'process_timeout', 'String') @= '');
 	CellPutS('14400', cAdm, 'process_timeout', 'String');
 ENDIF;
 sSrc = IF(pSourceDB @= '', CellGetS(cAdm, 'Database Name', 'String'), pSourceDB);
 IF(CellGetS(cEnv, 'Source', 'Database Name') @= '');
 	CellPutS(sSrc, cEnv, 'Source', 'Database Name');
-ENDIF;
-IF(CellGetS(cEnv, 'Source', 'Reporting Instance') @= '');
-	CellPutS('Yes', cEnv, 'Source', 'Reporting Instance');
 ENDIF;
 IF(pTarget1DB @<> '' & CellGetS(cEnv, 'Target1', 'Database Name') @= '');
 	CellPutS(pTarget1DB, cEnv, 'Target1', 'Database Name');

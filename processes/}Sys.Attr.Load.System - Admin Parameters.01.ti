@@ -26,13 +26,6 @@ ENDIF;
 #endregion
 #region Epilog
 IF(nOK = 1);
-vEl = 'Database Type';
-IF(DIMIX(cDim, vEl) > 0);
-	AttrPutS('Static:Development:Test:Production', cDim, vEl, 'Picklist');
-	nPut = nPut + 1;
-ELSE;
-	nSkip = nSkip + 1;
-ENDIF;
 ENDIF;
 ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', NumberToString(nPut) | ' values loaded, ' | NumberToString(nSkip) | ' elements not found');
 ExecuteProcess(cLogProc, 'pFlag', 'END', 'pProc', cProc, 'pMSG', IF(nOK = 1, 'SUCCESS', 'ERROR'));
