@@ -14,6 +14,12 @@
 			"Prompt":"Deployment (element of Deployments)",
 			"Value":"",
 			"Type":"String"
+		},
+		{
+			"Name":"pParallel",
+			"Prompt":"1 = run items in parallel waves (max_workers jobs at once), 0 = one at a time",
+			"Value":0,
+			"Type":"Numeric"
 		}
 	],
 	"Variables":[],

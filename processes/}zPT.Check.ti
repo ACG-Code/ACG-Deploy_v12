@@ -1,0 +1,8 @@
+#region Prolog
+NumericGlobalVariable('gHttpCode');
+StringGlobalVariable('gHttpBody');
+ExecuteProcess('}Sys.API.Request', 'pDB', 'Target1', 'pMethod', 'POST', 'pPath', '/ExecuteMDX?$expand=Cells($select=Value)', 'pBody',
+  '{"MDX":"WITH MEMBER [zPT_Col].[zPT_Col].[Tot] AS SUM({TM1FILTERBYLEVEL(TM1SUBSETALL([zPT_Row].[zPT_Row]),0)} * {TM1SUBSETALL([zPT_Col].[zPT_Col])}) MEMBER [zPT_Col].[zPT_Col].[Cnt] AS COUNT(FILTER({TM1FILTERBYLEVEL(TM1SUBSETALL([zPT_Row].[zPT_Row]),0)} * {TM1SUBSETALL([zPT_Col].[zPT_Col])}, [zParallelTest].([zPT_Col].[zPT_Col].CurrentMember) <> 0)) SELECT {[zPT_Col].[zPT_Col].[Tot],[zPT_Col].[zPT_Col].[Cnt]} ON 0, {[zPT_Row].[zPT_Row].[R1]} ON 1 FROM [zParallelTest]"}',
+  'pAsync', 0, 'pLog', 1);
+
+#endregion

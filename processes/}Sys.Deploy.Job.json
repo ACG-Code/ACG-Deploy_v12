@@ -1,0 +1,70 @@
+{
+	"@type":"Process",
+	"Name":"}Sys.Deploy.Job",
+	"HasSecurityAccess":false,
+	"Code@Code.link":"}Sys.Deploy.Job.ti",
+	"DataSource":
+	{
+		"Type":"None"
+	},
+	"Parameters":
+	[
+		{
+			"Name":"pDeployment",
+			"Prompt":"Deployment (element of Deployments)",
+			"Value":"",
+			"Type":"String"
+		},
+		{
+			"Name":"pItem",
+			"Prompt":"Item (element of Deployment - Items)",
+			"Value":"",
+			"Type":"String"
+		},
+		{
+			"Name":"pTarget",
+			"Prompt":"Target environment (element of Deployment-Environments)",
+			"Value":"",
+			"Type":"String"
+		},
+		{
+			"Name":"pRunID",
+			"Prompt":"Run ID of the orchestrator run that started this job",
+			"Value":"",
+			"Type":"String"
+		},
+		{
+			"Name":"pTimeout",
+			"Prompt":"Default RunTI timeout in seconds (item Timeout overrides)",
+			"Value":14400,
+			"Type":"Numeric"
+		},
+		{
+			"Name":"pPart",
+			"Prompt":"Cube items: blank = whole item, Structure = cube + rules + clear target, Slice = one data slice",
+			"Value":"",
+			"Type":"String"
+		},
+		{
+			"Name":"pSliceDim",
+			"Prompt":"Slice: dimension to split",
+			"Value":"",
+			"Type":"String"
+		},
+		{
+			"Name":"pSliceNo",
+			"Prompt":"Slice: this slice, 1..pSliceCount",
+			"Value":0,
+			"Type":"Numeric"
+		},
+		{
+			"Name":"pSliceCount",
+			"Prompt":"Slice: number of slices",
+			"Value":0,
+			"Type":"Numeric"
+		}
+	],
+	"Variables":[],
+	"UIData": "CubeAction=1511\fDataAction=1503\fCubeLogChanges=0\f",
+	"VariablesUIData": []
+}

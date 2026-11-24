@@ -1,0 +1,42 @@
+#region Prolog
+c = 'zParallelTest';
+IF(CubeExists(c) = 1); CubeDestroy(c); ENDIF;
+IF(DimensionExists('zPT_Row') = 1); DimensionDestroy('zPT_Row'); ENDIF;
+IF(DimensionExists('zPT_Col') = 1); DimensionDestroy('zPT_Col'); ENDIF;
+DimensionCreate('zPT_Row');
+DimensionElementInsertDirect('zPT_Row', '', 'All Rows', 'C');
+i = 1;
+WHILE(i <= 200);
+  DimensionElementInsertDirect('zPT_Row', '', 'R' | NumberToString(i), 'N');
+  DimensionElementComponentAddDirect('zPT_Row', 'All Rows', 'R' | NumberToString(i), 1);
+  i = i + 1;
+END;
+DimensionCreate('zPT_Col');
+i = 1;
+WHILE(i <= 5);
+  DimensionElementInsertDirect('zPT_Col', '', 'C' | NumberToString(i), 'N');
+  i = i + 1;
+END;
+CubeCreate(c, 'zPT_Row', 'zPT_Col');
+
+#endregion
+#region Epilog
+c = 'zParallelTest';
+r = 1;
+WHILE(r <= 200);
+  k = 1;
+  WHILE(k <= 5);
+    CellPutN(r * 10 + k, c, 'R' | NumberToString(r), 'C' | NumberToString(k));
+    k = k + 1;
+  END;
+  r = r + 1;
+END;
+d = 'Deployment 24';
+CellPutS('Yes', 'Deployment', d, 'All Items', 'Active');
+CellPutS('Slice test (temporary)', 'Deployment', d, 'All Items', 'Name');
+CellPutS('Yes', 'Deployment', d, 'Item 1', 'Active');
+CellPutS('Cube', 'Deployment', d, 'Item 1', 'Type');
+CellPutS(c, 'Deployment', d, 'Item 1', 'Name');
+CellPutS('Target1', 'Deployment', d, 'Item 1', 'Target 1');
+
+#endregion

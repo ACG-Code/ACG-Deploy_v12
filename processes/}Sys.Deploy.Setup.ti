@@ -4,13 +4,15 @@
 # Purpose: Install / complete the deployment system on this database. Safe to re-run: existing
 #          objects and values are kept, missing ones are added.
 #            Prerequisites: Process Log cubes (runs 'PLog - Build' if missing),
-#                           System - Admin Parameters (Base URL, Database Name, process_timeout),
-#                           }API Control (Tenant ID, API Key)
+#                           System - Admin Parameters (Base URL, Database Name, process_timeout,
+#                           max_workers), }API Control (Tenant ID, API Key)
 #            Dimensions : Deployments, Deployment - Items, mDeployments,
-#                         Deployment-Environments, mDeployment-Environments
-#            Cubes      : Deployment, Deployment Environments, }PickList_Deployment
-#            Settings   : process_timeout default; this tenant's connection values from
-#                         pThisDB / pBaseURL / pTenantID / pApiKey (blank = keep)
+#                         Deployment-Environments, mDeployment-Environments,
+#                         Deployment - Job Parts, mDeployment Jobs
+#            Cubes      : Deployment, Deployment Environments, }PickList_Deployment,
+#                         }Deployment Jobs (parallel job results)
+#            Settings   : process_timeout and max_workers defaults; this tenant's connection values
+#                         from pThisDB / pBaseURL / pTenantID / pApiKey (blank = keep)
 #          Then run }Sys.Deploy.Setup.Rules (rules + groups) once the connection values are set.
 #          It is not started from here: in v12 a child process holds up this process's commit.
 #          The API key is never logged.
@@ -25,6 +27,10 @@
 #     2026.11.24 (ACGI) - Unused measures removed (Reporting Instance, Address, Server Name,
 #                         Database Type, max_workers) and }PickList_Deployment Environments
 #     2026.11.24 (ACGI) - Owner kept in mDeployments (informational, not used by the processes)
+#     2026.11.24 (ACGI) - Parallel deployment: max_workers back (queue size, default 4), Wave
+#                         measure (wave override), }Deployment Jobs cube for job results
+#     2026.11.24 (ACGI) - Deployment - Job Parts (Item, Slice 1-32) in }Deployment Jobs for
+#                         cube data slices; a 4-dimension }Deployment Jobs is rebuilt
 #EndRegion
 
 #Region --------------- Constants ---------------
@@ -41,6 +47,10 @@ cAPI = '}API Control';
 cAPIDim = '}API_Control';
 cAPIMeas = '}mAPI_Control';
 cEnv = 'Deployment Environments';
+cJobs = '}Deployment Jobs';
+cJobMeas = 'mDeployment Jobs';
+cJobParts = 'Deployment - Job Parts';
+cMaxSlices = 32;
 #EndRegion
 
 #Region --------------- Prerequisite: Process Log ---------------
@@ -102,10 +112,17 @@ END;
 IF(DimensionElementExists(cAdm, 'Deployment Parameters') = 0);
 	DimensionElementInsertDirect(cAdm, '', 'Deployment Parameters', 'C');
 ENDIF;
-IF(DimensionElementExists(cAdm, 'process_timeout') = 0);
-	DimensionElementInsertDirect(cAdm, '', 'process_timeout', 'N');
-	DimensionElementComponentAddDirect(cAdm, 'Deployment Parameters', 'process_timeout', 1);
-ENDIF;
+sList = 'process_timeout|max_workers|';
+nPos = SCAN('|', sList);
+WHILE(nPos > 0);
+	sEl = SUBST(sList, 1, nPos - 1);
+	sList = SUBST(sList, nPos + 1, LONG(sList) - nPos);
+	IF(DimensionElementExists(cAdm, sEl) = 0);
+		DimensionElementInsertDirect(cAdm, '', sEl, 'N');
+		DimensionElementComponentAddDirect(cAdm, 'Deployment Parameters', sEl, 1);
+	ENDIF;
+	nPos = SCAN('|', sList);
+END;
 IF(DimensionExists(cAdmMeas) = 0);
 	DimensionCreate(cAdmMeas);
 ENDIF;
@@ -174,7 +191,7 @@ WHILE(nI <= 49);
 	nI = nI + 1;
 END;
 
-# mDeployments (all string measures; Owner is informational only)
+# mDeployments (all string measures; Owner is informational only; Wave overrides the default wave)
 sDim = 'mDeployments';
 IF(DimensionExists(sDim) = 0);
 	DimensionCreate(sDim);
@@ -182,14 +199,19 @@ ENDIF;
 sList = 'Active|Type|Name|Owner|Source|Target 1|Target 2|Target 3|Target 4|Target 5|'
 	| 'Include Attribute Values|Copy Attribute Rules|Include Subsets|Include Security Cube|'
 	| 'Parameter 1|Parameter 2|Parameter 3|Parameter 4|Parameter 5|Parameter 6|Parameter 7|Parameter 8|Parameter 9|Parameter 10|'
-	| 'Timeout|Deployment Status|Deployment Start|Deployment End|Deployment Duration|';
+	| 'Timeout|Wave|Deployment Status|Deployment Start|Deployment End|Deployment Duration|';
 nPos = SCAN('|', sList);
 WHILE(nPos > 0);
 	sEl = SUBST(sList, 1, nPos - 1);
 	sList = SUBST(sList, nPos + 1, LONG(sList) - nPos);
 	IF(DimensionElementExists(sDim, sEl) = 0);
-		# Owner added to an existing dimension goes before Source, not at the end
-		sIns = IF(sEl @= 'Owner' & DimensionElementExists(sDim, 'Source') = 1, 'Source', '');
+		# Owner / Wave added to an existing dimension go in their place, not at the end
+		sIns = '';
+		IF(sEl @= 'Owner' & DimensionElementExists(sDim, 'Source') = 1);
+			sIns = 'Source';
+		ELSEIF(sEl @= 'Wave' & DimensionElementExists(sDim, 'Deployment Status') = 1);
+			sIns = 'Deployment Status';
+		ENDIF;
 		DimensionElementInsertDirect(sDim, sIns, sEl, 'S');
 	ENDIF;
 	nPos = SCAN('|', sList);
@@ -228,6 +250,45 @@ WHILE(nPos > 0);
 	nPos = SCAN('|', sList);
 END;
 
+# Deployment - Job Parts: Item = the whole item (or a cube's structure), Slice n = cube data slice n
+sDim = cJobParts;
+IF(DimensionExists(sDim) = 0);
+	DimensionCreate(sDim);
+ENDIF;
+IF(DimensionElementExists(sDim, 'Item') = 0);
+	DimensionElementInsertDirect(sDim, '', 'Item', 'N');
+ENDIF;
+nI = 1;
+WHILE(nI <= cMaxSlices);
+	sEl = 'Slice ' | NumberToString(nI);
+	IF(DimensionElementExists(sDim, sEl) = 0);
+		DimensionElementInsertDirect(sDim, '', sEl, 'N');
+	ENDIF;
+	nI = nI + 1;
+END;
+
+# mDeployment Jobs: one job = one item (or one slice of it) to one target, written only by }Sys.Deploy.Job
+#   Run ID  = the orchestrator run that started the job (stale results are ignored)
+#   OK      = 1 when the worker succeeded;  Message = worker result or error
+#   Start / End = job start and end as date-time serials
+sDim = cJobMeas;
+IF(DimensionExists(sDim) = 0);
+	DimensionCreate(sDim);
+ENDIF;
+sList = 'Run ID|S|OK|N|Message|S|Start|N|End|N|';
+nPos = SCAN('|', sList);
+WHILE(nPos > 0);
+	sEl = SUBST(sList, 1, nPos - 1);
+	sList = SUBST(sList, nPos + 1, LONG(sList) - nPos);
+	nPos = SCAN('|', sList);
+	sT = SUBST(sList, 1, nPos - 1);
+	sList = SUBST(sList, nPos + 1, LONG(sList) - nPos);
+	IF(DimensionElementExists(sDim, sEl) = 0);
+		DimensionElementInsertDirect(sDim, '', sEl, sT);
+	ENDIF;
+	nPos = SCAN('|', sList);
+END;
+
 # leaf subset used by the Source/Target picklists
 IF(SubsetExists('Deployment-Environments', 'System - Leaves') = 0);
 	SubsetCreateByMDX('System - Leaves', '{TM1FILTERBYLEVEL({TM1SUBSETALL([Deployment-Environments])}, 0)}', 'Deployment-Environments', 0);
@@ -244,6 +305,16 @@ IF(CubeExists(cEnv) = 0);
 ENDIF;
 IF(CubeExists('}PickList_Deployment') = 0);
 	CubeCreate('}PickList_Deployment', 'Deployments', 'Deployment - Items', 'mDeployments', '}PickList');
+ENDIF;
+# job results only: a first-version cube without Job Parts is rebuilt
+IF(CubeExists(cJobs) = 1);
+	IF(CubeDimensionCountGet(cJobs) <> 5);
+		CubeDestroy(cJobs);
+		ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', cJobs | ' rebuilt with ' | cJobParts);
+	ENDIF;
+ENDIF;
+IF(CubeExists(cJobs) = 0);
+	CubeCreate(cJobs, 'Deployments', 'Deployment - Items', 'Deployment-Environments', cJobParts, cJobMeas);
 ENDIF;
 ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Cubes ok');
 #EndRegion
@@ -275,6 +346,9 @@ ENDIF;
 #Region --------------- Default settings (only if blank) ---------------
 IF(CellGetS(cAdm, 'process_timeout', 'String') @= '');
 	CellPutS('14400', cAdm, 'process_timeout', 'String');
+ENDIF;
+IF(CellGetS(cAdm, 'max_workers', 'String') @= '');
+	CellPutS('4', cAdm, 'max_workers', 'String');
 ENDIF;
 sSrc = IF(pSourceDB @= '', CellGetS(cAdm, 'Database Name', 'String'), pSourceDB);
 IF(CellGetS(cEnv, 'Source', 'Database Name') @= '');
