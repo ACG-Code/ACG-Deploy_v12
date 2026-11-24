@@ -21,6 +21,8 @@
 #     2026.11.24 (ACGI) - Async rule/group calls; }PickList_Deployment Environments removed
 #     2026.11.24 (ACGI) - Owner kept (informational): enterable on All Items and on each item
 #     2026.11.24 (ACGI) - REST self-check: wrong connection values = critical error
+#     2026.11.24 (ACGI) - Parameter 1-10 also enterable on Cube items (pSplitDim|<dim>, pSlices|<n>
+#                         for parallel cube data slices); Timeout stays RunTI only
 #EndRegion
 
 #Region --------------- Constants ---------------
@@ -102,8 +104,11 @@ sR = 'SKIPCHECK;' | cNL | 'FEEDSTRINGS;' | cNL | cNL
 	| '# Dimension options only apply to Dimension items' | cNL
 	| '[''mDeployments'':{''Include Attribute Values'', ''Copy Attribute Rules'', ''Include Subsets'', ''Include Security Cube''}] = S:' | cNL
 	| '  IF(' | cItemDB | ' @<> ''Dimension'', '''', STET);' | cNL | cNL
-	| '# Parameters and Timeout only apply to RunTI items' | cNL
-	| '[''mDeployments'':{''Parameter 1'', ''Parameter 2'', ''Parameter 3'', ''Parameter 4'', ''Parameter 5'', ''Parameter 6'', ''Parameter 7'', ''Parameter 8'', ''Parameter 9'', ''Parameter 10'', ''Timeout''}] = S:' | cNL
+	| '# Parameters apply to RunTI items (process parameters) and Cube items (pSplitDim|<dim>, pSlices|<n>)' | cNL
+	| '[''mDeployments'':{''Parameter 1'', ''Parameter 2'', ''Parameter 3'', ''Parameter 4'', ''Parameter 5'', ''Parameter 6'', ''Parameter 7'', ''Parameter 8'', ''Parameter 9'', ''Parameter 10''}] = S:' | cNL
+	| '  IF(' | cItemDB | ' @<> ''RunTI'' & ' | cItemDB | ' @<> ''Cube'', '''', STET);' | cNL | cNL
+	| '# Timeout only applies to RunTI items' | cNL
+	| '[''mDeployments'':''Timeout''] = S:' | cNL
 	| '  IF(' | cItemDB | ' @<> ''RunTI'', '''', STET);' | cNL | cNL
 	| 'FEEDERS;' | cNL;
 ExecuteProcess('}Sys.API.Encode', 'pText', sR, 'pMode', 'json');
