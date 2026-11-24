@@ -1,0 +1,160 @@
+#region Prolog
+#****************************************************************
+# Sys.API.View.Axis   (helper for Sys.API.View.Copy)
+# Converts one native-view axis from GET format
+#   {"Subset":{"Name":..,"Expression":..,"Hierarchy":{..},"Elements":[..]}[,"Selected":{..}]}
+# to POST format:
+#   named subset -> "Subset@odata.bind" (subset is copied to the target first)
+#   MDX subset   -> "Subset":{"Hierarchy@odata.bind":..,"Expression":..}
+#   element list -> "Subset":{"Hierarchy@odata.bind":..,"Elements@odata.bind":[..]}
+#   title        -> + "Selected@odata.bind"
+# Returns StringGlobalVariable('gAxis') (JSON array), StringGlobalVariable('gAxisErr')
+#****************************************************************
+StringGlobalVariable('gAxis');
+StringGlobalVariable('gAxisErr');
+StringGlobalVariable('gEnc');
+NumericGlobalVariable('gDeployOK');
+StringGlobalVariable('gDeployMsg');
+gAxis = '';
+gAxisErr = '';
+
+s = pBody;
+sItems = '';
+p = Scan('"Subset":{', s);
+WHILE(p > 0);
+  s = Subst(s, p + 10, Long(s) - p - 9);
+
+  #---- Name ----
+  q = Scan('"Name":"', s);
+  s = Subst(s, q + 8, Long(s) - q - 7);
+  e = 1;
+  nEsc = 0;
+  WHILE(e <= Long(s));
+    c = Subst(s, e, 1);
+    IF(nEsc = 1);
+      nEsc = 0;
+    ELSEIF(c @= '\');
+      nEsc = 1;
+    ELSEIF(c @= '"');
+      BREAK;
+    ENDIF;
+    e = e + 1;
+  END;
+  sSubName = Subst(s, 1, e - 1);
+  s = Subst(s, e + 1, Long(s) - e);
+
+  #---- Expression ----
+  nHasExpr = 0;
+  sExpr = '';
+  q = Scan('"Expression":', s);
+  s = Subst(s, q + 13, Long(s) - q - 12);
+  IF(Subst(s, 1, 1) @= '"');
+    s = Subst(s, 2, Long(s) - 1);
+    e = 1;
+    nEsc = 0;
+    WHILE(e <= Long(s));
+      c = Subst(s, e, 1);
+      IF(nEsc = 1);
+        nEsc = 0;
+      ELSEIF(c @= '\');
+        nEsc = 1;
+      ELSEIF(c @= '"');
+        BREAK;
+      ENDIF;
+      e = e + 1;
+    END;
+    sExpr = Subst(s, 1, e - 1);
+    s = Subst(s, e + 1, Long(s) - e);
+    nHasExpr = 1;
+  ENDIF;
+
+  #---- Hierarchy / Dimension ----
+  q = Scan('"Hierarchy":{"Name":"', s);
+  s = Subst(s, q + 21, Long(s) - q - 20);
+  e = Scan('"', s);
+  sHier = Subst(s, 1, e - 1);
+  s = Subst(s, e + 1, Long(s) - e);
+  q = Scan('"Dimension":{"Name":"', s);
+  s = Subst(s, q + 21, Long(s) - q - 20);
+  e = Scan('"', s);
+  sDim = Subst(s, 1, e - 1);
+  s = Subst(s, e + 1, Long(s) - e);
+
+  ExecuteProcess('}Sys.API.Encode', 'pText', sDim, 'pMode', 'quote');
+  sDimQ = gEnc;
+  ExecuteProcess('}Sys.API.Encode', 'pText', sHier, 'pMode', 'quote');
+  sHierQ = gEnc;
+  sHB = 'Dimensions(''' | sDimQ | ''')/Hierarchies(''' | sHierQ | ''')';
+
+  #---- Elements ----
+  sElBinds = '';
+  q = Scan('"Elements":[', s);
+  s = Subst(s, q + 12, Long(s) - q - 11);
+  WHILE(Subst(s, 1, 9) @= '{"Name":"');
+    s = Subst(s, 10, Long(s) - 9);
+    e = 1;
+    nEsc = 0;
+    WHILE(e <= Long(s));
+      c = Subst(s, e, 1);
+      IF(nEsc = 1);
+        nEsc = 0;
+      ELSEIF(c @= '\');
+        nEsc = 1;
+      ELSEIF(c @= '"');
+        BREAK;
+      ENDIF;
+      e = e + 1;
+    END;
+    sEl = Subst(s, 1, e - 1);
+    s = Subst(s, e + 2, Long(s) - e - 1);
+    IF(Subst(s, 1, 1) @= ',');
+      s = Subst(s, 2, Long(s) - 1);
+    ENDIF;
+    IF(Scan('''', sEl) > 0);
+      ExecuteProcess('}Sys.API.Encode', 'pText', sEl, 'pMode', 'quote');
+      sEl = gEnc;
+    ENDIF;
+    sElBinds = sElBinds | IF(sElBinds @= '', '', ',') | '"' | sHB | '/Elements(''' | sEl | ''')"';
+  END;
+
+  #---- Selected (titles) ----
+  sSel = '';
+  IF(pTitles = 1);
+    q = Scan('"Selected":', s);
+    IF(q > 0);
+      s = Subst(s, q + 11, Long(s) - q - 10);
+      IF(Subst(s, 1, 9) @= '{"Name":"');
+        s = Subst(s, 10, Long(s) - 9);
+        e = Scan('"', s);
+        sSel = Subst(s, 1, e - 1);
+        s = Subst(s, e + 1, Long(s) - e);
+        ExecuteProcess('}Sys.API.Encode', 'pText', sSel, 'pMode', 'quote');
+        sSel = gEnc;
+      ENDIF;
+    ENDIF;
+  ENDIF;
+
+  #---- build entry ----
+  IF(sSubName @<> '');
+    ExecuteProcess('}Sys.API.Subset.Copy', 'pDim', sDim, 'pHier', sHier, 'pSubsets', sSubName, 'pTargetDB', pTargetDB);
+    IF(gDeployOK = 0);
+      gAxisErr = gAxisErr | IF(gAxisErr @= '', '', '; ') | 'subset ' | sDim | '|' | sSubName | ': ' | gDeployMsg;
+    ENDIF;
+    ExecuteProcess('}Sys.API.Encode', 'pText', sSubName, 'pMode', 'quote');
+    sEntry = '{"Subset@odata.bind":"' | sHB | '/Subsets(''' | gEnc | ''')"';
+  ELSEIF(nHasExpr = 1);
+    sEntry = '{"Subset":{"Hierarchy@odata.bind":"' | sHB | '","Expression":"' | sExpr | '"}';
+  ELSE;
+    sEntry = '{"Subset":{"Hierarchy@odata.bind":"' | sHB | '","Elements@odata.bind":[' | sElBinds | ']}';
+  ENDIF;
+  IF(sSel @<> '');
+    sEntry = sEntry | ',"Selected@odata.bind":"' | sHB | '/Elements(''' | sSel | ''')"';
+  ENDIF;
+  sEntry = sEntry | '}';
+  sItems = sItems | IF(sItems @= '', '', ',') | sEntry;
+
+  p = Scan('"Subset":{', s);
+END;
+gAxis = '[' | sItems | ']';
+
+#endregion

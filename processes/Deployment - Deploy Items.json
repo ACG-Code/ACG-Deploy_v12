@@ -1,0 +1,22 @@
+{
+	"@type":"Process",
+	"Name":"Deployment - Deploy Items",
+	"HasSecurityAccess":false,
+	"Code@Code.link":"Deployment - Deploy Items.ti",
+	"DataSource":
+	{
+		"Type":"None"
+	},
+	"Parameters":
+	[
+		{
+			"Name":"pDeployment",
+			"Prompt":"Deployment (element of Deployments)",
+			"Value":"",
+			"Type":"String"
+		}
+	],
+	"Variables":[],
+	"UIData": "CubeAction=1511\fDataAction=1503\fCubeLogChanges=0\f",
+	"VariablesUIData": []
+}

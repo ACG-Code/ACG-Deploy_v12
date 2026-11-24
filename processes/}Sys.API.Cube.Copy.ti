@@ -1,0 +1,177 @@
+#region Prolog
+#Region ############################################# HEADER #############################################
+# Process: }Sys.API.Cube.Copy
+# Purpose: Copy a cube from this database to the pTargetDB environment:
+#            1. any dimension missing on the target is copied first (}Sys.API.Dim.Copy.ToDatabase)
+#            2. cube created if missing; if it exists, its dimensions must match
+#            3. pRules = 1 -> }Sys.API.Object.Copy (Rule)
+#            4. pData  = 1 -> }Sys.API.Cube.Data.Push (pClear = 1 clears the target first)
+#          Returns NumericGlobalVariable('gDeployOK') and StringGlobalVariable('gDeployMsg').
+# Date Created: 2026.11.24 (ACGI)
+# Last Update: 2026.11.24
+# Notes:
+#     2026.11.24 (ACGI) - Initial Process Creation
+#     2026.11.24 (ACGI) - Process Example standard + PLOG logging; children checked via gDeployOK
+#     2026.11.24 (ACGI) - Process Log status (T08): ERROR only for critical errors
+#EndRegion
+
+#Region --------------- Constants ---------------
+cLogProc = 'PLOG';
+cProc = GetProcessName;
+cUser = NumberToString(DIMIX('}Clients', TM1USER));
+cTimestamp = TIMST(now, '\Y\m\d\h\i\s');
+cRandomInt = NumberToString(INT(RAND() * 1005));
+cView = '%cProc%.%cUser%.%cTimestamp%.%cRandomInt%';
+cTemp = 1;
+NumericGlobalVariable('gHttpCode');
+StringGlobalVariable('gHttpBody');
+StringGlobalVariable('gEnc');
+NumericGlobalVariable('gDeployOK');
+StringGlobalVariable('gDeployMsg');
+#EndRegion
+
+#Region --------------- Initialize Logging ---------------
+ExecuteProcess(cLogProc, 'pFlag', 'INIT', 'pProc', cProc);
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pCube=' | pCube, 'pLine', 'P01');
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pTargetDB=' | pTargetDB, 'pLine', 'P02');
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pRules=' | NumberToString(pRules), 'pLine', 'P03');
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pData=' | NumberToString(pData), 'pLine', 'P04');
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pClear=' | NumberToString(pClear), 'pLine', 'P05');
+#EndRegion
+
+#Region --------------- Error Handling ---------------
+nError = 0;
+nCritical = 0;
+sMessage = '';
+sResult = '';
+
+IF(CubeExists(pCube) = 0);
+	nError = 1;
+	sMessage = 'pCube: "' | pCube | '" not found on source';
+ELSEIF(pTargetDB @= '');
+	nError = 1;
+	sMessage = 'pTargetDB is required';
+ENDIF;
+
+IF(nError = 1);
+	ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', sMessage);
+	ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Critical errors, exiting');
+	nCritical = 1;
+	ProcessBreak;
+ENDIF;
+#EndRegion
+
+#Region --------------- Variables ---------------
+ExecuteProcess('}Sys.API.Encode', 'pText', pCube, 'pMode', 'key');
+sCubePath = '/Cubes(''' | gEnc | ''')';
+ExecuteProcess('}Sys.API.Encode', 'pText', pCube, 'pMode', 'json');
+sCubeJs = gEnc;
+nDims = CubeDimensionCountGet(pCube);
+sBinds = '';
+sSrcDims = '';
+sFail = '';
+#EndRegion
+
+#Region --------------- 1. Dimensions ---------------
+nD = 1;
+WHILE(nD <= nDims);
+	sDim = TABDIM(pCube, nD);
+	sSrcDims = sSrcDims | sDim | Char(1);
+	ExecuteProcess('}Sys.API.Encode', 'pText', sDim, 'pMode', 'bind');
+	sBinds = sBinds | IF(nD > 1, ',', '') | '"Dimensions(''' | gEnc | ''')"';
+	ExecuteProcess('}Sys.API.Encode', 'pText', sDim, 'pMode', 'key');
+	ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'GET', 'pPath', '/Dimensions(''' | gEnc | ''')?$select=Name');
+	IF(gHttpCode = 404);
+		ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Dimension ' | sDim | ' missing on target - copying');
+		ExecuteProcess('}Sys.API.Dim.Copy.ToDatabase', 'pDim', sDim, 'pTargetDB', pTargetDB);
+		IF(gDeployOK <> 1);
+			sFail = sFail | IF(sFail @= '', '', '; ') | 'dimension ' | sDim | ': ' | gDeployMsg;
+		ENDIF;
+	ELSEIF(gHttpCode <> 200);
+		sFail = sFail | IF(sFail @= '', '', '; ') | 'dimension ' | sDim | ' check HTTP ' | NumberToString(gHttpCode);
+	ENDIF;
+	nD = nD + 1;
+END;
+IF(sFail @<> '');
+	nError = 1;
+	sMessage = sFail;
+	ProcessBreak;
+ENDIF;
+#EndRegion
+
+#Region --------------- 2. Cube ---------------
+ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'GET', 'pPath', sCubePath | '?$select=Name&$expand=Dimensions($select=Name)');
+IF(gHttpCode = 404);
+	ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'POST', 'pPath', '/Cubes',
+		'pBody', '{"Name":"' | sCubeJs | '","Dimensions@odata.bind":[' | sBinds | ']}');
+	IF(gHttpCode <> 201);
+		nError = 1;
+		sMessage = 'cube create failed (HTTP ' | NumberToString(gHttpCode) | '): ' | gHttpBody;
+		ProcessBreak;
+	ENDIF;
+	sCubeAction = 'created';
+ELSEIF(gHttpCode = 200);
+	# same dimensions in the same order?
+	sTgtDims = '';
+	sResp = SUBST(gHttpBody, SCAN('"Dimensions":', gHttpBody), LONG(gHttpBody));
+	nPos = SCAN('"Name":"', sResp);
+	WHILE(nPos > 0);
+		sResp = SUBST(sResp, nPos + 8, LONG(sResp) - nPos - 7);
+		nEnd = SCAN('"', sResp);
+		sTgtDims = sTgtDims | SUBST(sResp, 1, nEnd - 1) | Char(1);
+		sResp = SUBST(sResp, nEnd + 1, LONG(sResp) - nEnd);
+		nPos = SCAN('"Name":"', sResp);
+	END;
+	IF(sTgtDims @<> sSrcDims);
+		nError = 1;
+		sMessage = 'cube exists on target with different dimensions - not changed';
+		ProcessBreak;
+	ENDIF;
+	sCubeAction = 'exists';
+ELSE;
+	nError = 1;
+	sMessage = 'cube check failed (HTTP ' | NumberToString(gHttpCode) | '): ' | gHttpBody;
+	ProcessBreak;
+ENDIF;
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Cube ' | sCubeAction);
+sResult = 'cube ' | sCubeAction;
+#EndRegion
+
+#Region --------------- 3. Rules ---------------
+IF(pRules = 1);
+	ExecuteProcess('}Sys.API.Object.Copy', 'pType', 'Rule', 'pName', pCube, 'pTargetDB', pTargetDB);
+	ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Rules: ' | gDeployMsg);
+	IF(gDeployOK <> 1);
+		nError = 1;
+		sMessage = sResult | ', rules: ' | gDeployMsg;
+		ProcessBreak;
+	ENDIF;
+	sResult = sResult | ', ' | gDeployMsg;
+ENDIF;
+#EndRegion
+
+#Region --------------- 4. Data ---------------
+IF(pData = 1);
+	ExecuteProcess('}Sys.API.Cube.Data.Push', 'pCube', pCube, 'pTargetDB', pTargetDB, 'pAllElements', 0, 'pClear', pClear);
+	ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Data: ' | gDeployMsg);
+	IF(gDeployOK <> 1);
+		nError = 1;
+		sMessage = sResult | ', data: ' | gDeployMsg;
+		ProcessBreak;
+	ENDIF;
+	sResult = sResult | ', ' | gDeployMsg;
+ENDIF;
+#EndRegion
+
+#endregion
+#region Epilog
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Beginning Epilog');
+
+gDeployOK = IF(nError = 1, 0, 1);
+gDeployMsg = IF(nError = 1, sMessage, sResult);
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', gDeployMsg);
+
+sStatus = IF(nCritical = 1, 'ERROR', 'SUCCESS');
+ExecuteProcess(cLogProc, 'pFlag', 'END', 'pProc', cProc, 'pMSG', sStatus);
+
+#endregion

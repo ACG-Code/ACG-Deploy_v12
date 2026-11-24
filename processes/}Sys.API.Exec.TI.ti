@@ -1,0 +1,53 @@
+#region Prolog
+#****************************************************************
+# Sys.API.Exec.TI
+# Runs a snippet of TI code on another database without saving a process
+# there (POST /ExecuteProcessWithReturn with an inline process).
+# Used for target-side steps such as CubeClearData and SecurityRefresh.
+# Returns: NumericGlobalVariable('gHttpCode'), StringGlobalVariable('gHttpBody'),
+#          StringGlobalVariable('gTIStatus')  e.g. CompletedSuccessfully
+#****************************************************************
+NumericGlobalVariable('gHttpCode');
+StringGlobalVariable('gHttpBody');
+StringGlobalVariable('gTIStatus');
+gTIStatus = '';
+
+# JSON-escape the code
+sOut = '';
+k = 1;
+WHILE(k <= Long(pCode));
+  c = Subst(pCode, k, 1);
+  IF(c @= '"');
+    sOut = sOut | '\"';
+  ELSEIF(c @= '\');
+    sOut = sOut | '\\';
+  ELSEIF(c @= Char(10));
+    sOut = sOut | '\n';
+  ELSEIF(c @= Char(13));
+    sOut = sOut | '\r';
+  ELSEIF(c @= Char(9));
+    sOut = sOut | '\t';
+  ELSE;
+    sOut = sOut | c;
+  ENDIF;
+  k = k + 1;
+END;
+
+sBody = '{"Process":{"Name":"}Sys.API.Exec.TI","PrologProcedure":"' | sOut | '"},"Parameters":[]}';
+ExecuteProcess('}Sys.API.Request', 'pDB', pDB, 'pMethod', 'POST',
+  'pPath', '/ExecuteProcessWithReturn?$expand=*', 'pBody', sBody, 'pLog', pLog);
+
+# pull ProcessExecuteStatusCode out of the response
+p = Scan('"ProcessExecuteStatusCode":"', gHttpBody);
+IF(p > 0);
+  sRest = Subst(gHttpBody, p + 28, Long(gHttpBody) - p - 27);
+  gTIStatus = Subst(sRest, 1, Scan('"', sRest) - 1);
+ENDIF;
+
+IF(pLog = 1);
+  DatasourceASCIIQuoteCharacter = '';
+  ASCIIOutput('Raw_Reports/Sys.API.Exec.TI.md', pDB | ' HTTP ' | NumberToString(gHttpCode) | ' status=' | gTIStatus);
+  ASCIIOutput('Raw_Reports/Sys.API.Exec.TI.md', gHttpBody);
+ENDIF;
+
+#endregion

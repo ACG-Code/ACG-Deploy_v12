@@ -1,0 +1,28 @@
+{
+	"@type":"Process",
+	"Name":"}Sys.API.Encode",
+	"HasSecurityAccess":false,
+	"Code@Code.link":"}Sys.API.Encode.ti",
+	"DataSource":
+	{
+		"Type":"None"
+	},
+	"Parameters":
+	[
+		{
+			"Name":"pText",
+			"Prompt":"Text to encode",
+			"Value":"",
+			"Type":"String"
+		},
+		{
+			"Name":"pMode",
+			"Prompt":"key = OData key in a URL; json = JSON string; bind = OData key inside a JSON string",
+			"Value":"key",
+			"Type":"String"
+		}
+	],
+	"Variables":[],
+	"UIData": "CubeAction=1511\fDataAction=1503\fCubeLogChanges=0\f",
+	"VariablesUIData": []
+}

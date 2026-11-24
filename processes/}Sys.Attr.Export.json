@@ -1,0 +1,28 @@
+{
+	"@type":"Process",
+	"Name":"}Sys.Attr.Export",
+	"HasSecurityAccess":false,
+	"Code@Code.link":"}Sys.Attr.Export.ti",
+	"DataSource":
+	{
+		"Type":"None"
+	},
+	"Parameters":
+	[
+		{
+			"Name":"pDims",
+			"Prompt":"Dimensions separated by ; (blank = every non-control dimension with attributes)",
+			"Value":"",
+			"Type":"String"
+		},
+		{
+			"Name":"pExclude",
+			"Prompt":"Dimensions to skip when pDims is blank, separated by ;",
+			"Value":"Process Log Line;Process Log Run",
+			"Type":"String"
+		}
+	],
+	"Variables":[],
+	"UIData": "CubeAction=1511\fDataAction=1503\fCubeLogChanges=0\f",
+	"VariablesUIData": []
+}

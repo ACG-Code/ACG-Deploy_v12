@@ -1,0 +1,73 @@
+#region Prolog
+#Region ############################################# HEADER #############################################
+# Process: }Sys.Attr.Load.All
+# Purpose: After a PAW Git pull, load attribute values by running every }Sys.Attr.Load.<dim>.NN
+#          process (written by }Sys.Attr.Export in the source database). Each loader logs its
+#          own result in the Process Log.
+# Date Created: 2026.11.24 (ACGI)
+# Last Update: 2026.11.24
+# Notes:
+#     2026.11.24 (ACGI) - Initial Process Creation
+#     2026.11.24 (ACGI) - Process Log status (T08): ERROR only for critical errors
+#EndRegion
+
+#Region --------------- Constants ---------------
+cLogProc = 'PLOG';
+cProc = GetProcessName;
+cUser = NumberToString(DIMIX('}Clients', TM1USER));
+cTimestamp = TIMST(now, '\Y\m\d\h\i\s');
+cRandomInt = NumberToString(INT(RAND() * 1005));
+cView = '%cProc%.%cUser%.%cTimestamp%.%cRandomInt%';
+cTemp = 1;
+cPrefix = '}Sys.Attr.Load.';
+#EndRegion
+
+#Region --------------- Initialize Logging ---------------
+ExecuteProcess(cLogProc, 'pFlag', 'INIT', 'pProc', cProc);
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pDims=' | pDims, 'pLine', 'P01');
+#EndRegion
+
+#Region --------------- Error Handling ---------------
+nError = 0;
+nCritical = 0;
+sMessage = '';
+sFail = '';
+#EndRegion
+
+#Region --------------- Run the loaders ---------------
+sOnly = IF(pDims @= '', '', ';' | UPPER(pDims) | ';');
+nRun = 0;
+nI = 1;
+WHILE(nI <= DIMSIZ('}Processes'));
+	sP = DIMNM('}Processes', nI);
+	IF(SUBST(sP, 1, LONG(cPrefix)) @= cPrefix & sP @<> cProc);
+		# loader name = prefix + dimension + '.NN'
+		sDim = SUBST(sP, LONG(cPrefix) + 1, LONG(sP) - LONG(cPrefix) - 3);
+		IF(sOnly @= '' % SCAN(';' | UPPER(sDim) | ';', sOnly) > 0);
+			nRet = ExecuteProcess(sP);
+			nRun = nRun + 1;
+			IF(nRet <> ProcessExitNormal());
+				sFail = sFail | IF(sFail @= '', '', '; ') | sP;
+			ENDIF;
+			ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', sP | IF(nRet = ProcessExitNormal(), ': ok', ': FAILED - see its Process Log'));
+		ENDIF;
+	ENDIF;
+	nI = nI + 1;
+END;
+IF(sFail @<> '');
+	nError = 1;
+	sMessage = 'failed: ' | sFail;
+ENDIF;
+#EndRegion
+
+#endregion
+#region Epilog
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Beginning Epilog');
+
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG',
+	IF(nError = 1, sMessage, NumberToString(nRun) | ' loaders run'));
+
+sStatus = IF(nCritical = 1, 'ERROR', 'SUCCESS');
+ExecuteProcess(cLogProc, 'pFlag', 'END', 'pProc', cProc, 'pMSG', sStatus);
+
+#endregion

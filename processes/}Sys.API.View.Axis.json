@@ -1,0 +1,34 @@
+{
+	"@type":"Process",
+	"Name":"}Sys.API.View.Axis",
+	"HasSecurityAccess":false,
+	"Code@Code.link":"}Sys.API.View.Axis.ti",
+	"DataSource":
+	{
+		"Type":"None"
+	},
+	"Parameters":
+	[
+		{
+			"Name":"pBody",
+			"Prompt":"GET response for one native-view axis",
+			"Value":"",
+			"Type":"String"
+		},
+		{
+			"Name":"pTargetDB",
+			"Prompt":"Target database (named subsets are copied there)",
+			"Value":"",
+			"Type":"String"
+		},
+		{
+			"Name":"pTitles",
+			"Prompt":"1 = Titles axis (has Selected element)",
+			"Value":0,
+			"Type":"Numeric"
+		}
+	],
+	"Variables":[],
+	"UIData": "CubeAction=1511\fDataAction=1503\fCubeLogChanges=0\f",
+	"VariablesUIData": []
+}

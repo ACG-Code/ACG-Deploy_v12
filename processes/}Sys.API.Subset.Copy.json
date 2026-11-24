@@ -1,0 +1,40 @@
+{
+	"@type":"Process",
+	"Name":"}Sys.API.Subset.Copy",
+	"HasSecurityAccess":false,
+	"Code@Code.link":"}Sys.API.Subset.Copy.ti",
+	"DataSource":
+	{
+		"Type":"None"
+	},
+	"Parameters":
+	[
+		{
+			"Name":"pDim",
+			"Prompt":"Dimension",
+			"Value":"",
+			"Type":"String"
+		},
+		{
+			"Name":"pHier",
+			"Prompt":"Hierarchy (blank = same as dimension)",
+			"Value":"",
+			"Type":"String"
+		},
+		{
+			"Name":"pSubsets",
+			"Prompt":"Subset names separated by ; (blank = every public subset)",
+			"Value":"",
+			"Type":"String"
+		},
+		{
+			"Name":"pTargetDB",
+			"Prompt":"Target database (same tenant)",
+			"Value":"",
+			"Type":"String"
+		}
+	],
+	"Variables":[],
+	"UIData": "CubeAction=1511\fDataAction=1503\fCubeLogChanges=0\f",
+	"VariablesUIData": []
+}

@@ -1,0 +1,46 @@
+{
+	"@type":"Process",
+	"Name":"}Sys.API.Cube.Copy",
+	"HasSecurityAccess":false,
+	"Code@Code.link":"}Sys.API.Cube.Copy.ti",
+	"DataSource":
+	{
+		"Type":"None"
+	},
+	"Parameters":
+	[
+		{
+			"Name":"pCube",
+			"Prompt":"Cube to copy (this database)",
+			"Value":"",
+			"Type":"String"
+		},
+		{
+			"Name":"pTargetDB",
+			"Prompt":"Target database (same tenant)",
+			"Value":"",
+			"Type":"String"
+		},
+		{
+			"Name":"pRules",
+			"Prompt":"1 = copy rules",
+			"Value":1,
+			"Type":"Numeric"
+		},
+		{
+			"Name":"pData",
+			"Prompt":"1 = copy stored data (REST push)",
+			"Value":0,
+			"Type":"Numeric"
+		},
+		{
+			"Name":"pClear",
+			"Prompt":"1 = clear target cube before copying data",
+			"Value":0,
+			"Type":"Numeric"
+		}
+	],
+	"Variables":[],
+	"UIData": "CubeAction=1511\fDataAction=1503\fCubeLogChanges=0\f",
+	"VariablesUIData": []
+}

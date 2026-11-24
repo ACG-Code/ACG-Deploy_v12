@@ -1,0 +1,22 @@
+{
+	"@type":"Process",
+	"Name":"}Sys.Attr.Load.All",
+	"HasSecurityAccess":false,
+	"Code@Code.link":"}Sys.Attr.Load.All.ti",
+	"DataSource":
+	{
+		"Type":"None"
+	},
+	"Parameters":
+	[
+		{
+			"Name":"pDims",
+			"Prompt":"Only these dimensions, separated by ; (blank = every loader)",
+			"Value":"",
+			"Type":"String"
+		}
+	],
+	"Variables":[],
+	"UIData": "CubeAction=1511\fDataAction=1503\fCubeLogChanges=0\f",
+	"VariablesUIData": []
+}

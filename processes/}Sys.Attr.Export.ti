@@ -1,0 +1,291 @@
+#region Prolog
+#Region ############################################# HEADER #############################################
+# Process: }Sys.Attr.Export
+# Purpose: Put attribute values into processes so they travel with PAW Git push / pull.
+#          For each dimension writes }Sys.Attr.Load.<dim>.01 (.02, ... for large dimensions)
+#          whose code holds the attribute values. On the target: Git pull, then run
+#          }Sys.Attr.Load.All (or a single loader). Loaders create missing attributes, skip
+#          elements that are not there, and do not write rule-calculated attributes.
+#          Processes are created with async REST calls, so they appear when this process ends
+#          (a synchronous call to this database's }Processes would wait on this process).
+# Date Created: 2026.11.24 (ACGI)
+# Last Update: 2026.11.24
+# Notes:
+#     2026.11.24 (ACGI) - Initial Process Creation
+#     2026.11.24 (ACGI) - Process Log status (T08): ERROR only for critical errors
+#EndRegion
+
+#Region --------------- Constants ---------------
+cLogProc = 'PLOG';
+cProc = GetProcessName;
+cUser = NumberToString(DIMIX('}Clients', TM1USER));
+cTimestamp = TIMST(now, '\Y\m\d\h\i\s');
+cRandomInt = NumberToString(INT(RAND() * 1005));
+cView = '%cProc%.%cUser%.%cTimestamp%.%cRandomInt%';
+cTemp = 1;
+cMax = 50000;
+cNL = '\n';
+cTab = '\t';
+cPrefix = '}Sys.Attr.Load.';
+cThisDB = CellGetS('System - Admin Parameters', 'Database Name', 'String');
+cToday = TIMST(NOW, '\Y.\m.\d');
+NumericGlobalVariable('gHttpCode');
+StringGlobalVariable('gHttpBody');
+StringGlobalVariable('gHttpLocation');
+StringGlobalVariable('gEnc');
+#EndRegion
+
+#Region --------------- Initialize Logging ---------------
+ExecuteProcess(cLogProc, 'pFlag', 'INIT', 'pProc', cProc);
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pDims=' | pDims, 'pLine', 'P01');
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pExclude=' | pExclude, 'pLine', 'P02');
+#EndRegion
+
+#Region --------------- Error Handling ---------------
+nError = 0;
+nCritical = 0;
+sMessage = '';
+sFail = '';
+#EndRegion
+
+#Region --------------- Dimensions to export (Char(1)-separated) ---------------
+sDimList = '';
+IF(pDims @= '');
+	sExcl = ';' | UPPER(pExclude) | ';';
+	nI = 1;
+	WHILE(nI <= DIMSIZ('}Dimensions'));
+		sD = DIMNM('}Dimensions', nI);
+		IF(SUBST(sD, 1, 1) @<> '}');
+			IF(DimensionExists('}ElementAttributes_' | sD) = 1 & SCAN(';' | UPPER(sD) | ';', sExcl) = 0);
+				sDimList = sDimList | sD | Char(1);
+			ENDIF;
+		ENDIF;
+		nI = nI + 1;
+	END;
+ELSE;
+	sRest = pDims | ';';
+	nPos = SCAN(';', sRest);
+	WHILE(nPos > 0);
+		sD = TRIM(SUBST(sRest, 1, nPos - 1));
+		IF(sD @<> '');
+			sDimList = sDimList | sD | Char(1);
+		ENDIF;
+		sRest = SUBST(sRest, nPos + 1, LONG(sRest) - nPos);
+		nPos = SCAN(';', sRest);
+	END;
+ENDIF;
+#EndRegion
+
+#Region --------------- Export each dimension ---------------
+nDims = 0;
+nLoaders = 0;
+nDPos = SCAN(Char(1), sDimList);
+WHILE(nDPos > 0);
+	sDim = SUBST(sDimList, 1, nDPos - 1);
+	sDimList = SUBST(sDimList, nDPos + 1, LONG(sDimList) - nDPos);
+	sAD = '}ElementAttributes_' | sDim;
+
+	IF(DimensionExists(sDim) = 0 % DimensionExists(sAD) = 0);
+		sFail = sFail | IF(sFail @= '', '', '; ') | sDim | ': no such dimension or no attributes';
+		ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', sDim | ': no such dimension or no attributes - skipped');
+	ELSE;
+		nDims = nDims + 1;
+		# dimension name: TI literal + JSON escaped
+		sTxt = sDim;
+		sOut = '';
+		IF(SCAN('''', sTxt) + SCAN('"', sTxt) + SCAN('\', sTxt) = 0);
+			sOut = sTxt;
+		ELSE;
+			nC = 1;
+			WHILE(nC <= LONG(sTxt));
+				sC = SUBST(sTxt, nC, 1);
+				sOut = sOut | IF(sC @= '''', '''''', IF(sC @= '"', '\"', IF(sC @= '\', '\\', sC)));
+				nC = nC + 1;
+			END;
+		ENDIF;
+		sDimJ = sOut;
+		ExecuteProcess('}Sys.API.Encode', 'pText', sDim, 'pMode', 'json');
+		sDimJs = gEnc;
+
+		#---- attributes: names (TI+JSON escaped), types; prolog inserts ----
+		sAttrRaw = '';
+		sAttrJ = '';
+		sAttrT = '';
+		sIns = '';
+		nA = DIMSIZ(sAD);
+		nK = 1;
+		WHILE(nK <= nA);
+			sAttr = DIMNM(sAD, nK);
+			sT = DTYPE(sAD, sAttr);
+			sTI = IF(sT @= 'AN', 'N', IF(sT @= 'AA', 'A', 'S'));
+			sTxt = sAttr;
+			sOut = '';
+			IF(SCAN('''', sTxt) + SCAN('"', sTxt) + SCAN('\', sTxt) = 0);
+				sOut = sTxt;
+			ELSE;
+				nC = 1;
+				WHILE(nC <= LONG(sTxt));
+					sC = SUBST(sTxt, nC, 1);
+					sOut = sOut | IF(sC @= '''', '''''', IF(sC @= '"', '\"', IF(sC @= '\', '\\', sC)));
+					nC = nC + 1;
+				END;
+			ENDIF;
+			sAttrRaw = sAttrRaw | sAttr | Char(1);
+			sAttrJ = sAttrJ | sOut | Char(1);
+			sAttrT = sAttrT | sTI;
+			sIns = sIns | 'IF(DIMIX(''}ElementAttributes_'' | cDim, ''' | sOut | ''') = 0);' | cNL
+				| cTab | 'AttrInsert(cDim, '''', ''' | sOut | ''', ''' | sTI | ''');' | cNL | 'ENDIF;' | cNL;
+			nK = nK + 1;
+		END;
+
+		#---- elements; the extra pass (nE = size + 1) writes the last part ----
+		sEp = '';
+		nPart = 0;
+		nVals = 0;
+		nSize = DIMSIZ(sDim);
+		nE = 1;
+		WHILE(nE <= nSize + 1);
+			sBlk = '';
+			IF(nE <= nSize);
+				sE = DIMNM(sDim, nE);
+				sLine = '';
+				nCnt = 0;
+				sRA = sAttrRaw;
+				sRJ = sAttrJ;
+				nK = 1;
+				WHILE(nK <= nA);
+					nP1 = SCAN(Char(1), sRA);
+					sAttr = SUBST(sRA, 1, nP1 - 1);
+					sRA = SUBST(sRA, nP1 + 1, LONG(sRA) - nP1);
+					nP2 = SCAN(Char(1), sRJ);
+					sAJ = SUBST(sRJ, 1, nP2 - 1);
+					sRJ = SUBST(sRJ, nP2 + 1, LONG(sRJ) - nP2);
+					sTI = SUBST(sAttrT, nK, 1);
+					IF(CellIsUpdateable(sAD, sE, sAttr) = 1);
+						IF(sTI @= 'N');
+							nV = ATTRN(sDim, sE, sAttr);
+							IF(nV <> 0);
+								sLine = sLine | cTab | 'AttrPutN(' | NumberToString(nV) | ', cDim, vEl, ''' | sAJ | ''');' | cNL;
+								nCnt = nCnt + 1;
+							ENDIF;
+						ELSE;
+							sTxt = ATTRS(sDim, sE, sAttr);
+							IF(sTxt @<> '');
+								sOut = '';
+								IF(SCAN('''', sTxt) + SCAN('"', sTxt) + SCAN('\', sTxt) + SCAN(Char(10), sTxt) + SCAN(Char(13), sTxt) + SCAN(Char(9), sTxt) = 0);
+									sOut = sTxt;
+								ELSE;
+									nC = 1;
+									WHILE(nC <= LONG(sTxt));
+										sC = SUBST(sTxt, nC, 1);
+										sOut = sOut | IF(sC @= '''', '''''', IF(sC @= '"', '\"', IF(sC @= '\', '\\',
+											IF(sC @= Char(10), ''' | Char(10) | ''', IF(sC @= Char(13), ''' | Char(13) | ''', IF(sC @= Char(9), ''' | Char(9) | ''', sC))))));
+										nC = nC + 1;
+									END;
+								ENDIF;
+								sLine = sLine | cTab | 'AttrPutS(''' | sOut | ''', cDim, vEl, ''' | sAJ | ''');' | cNL;
+								nCnt = nCnt + 1;
+							ENDIF;
+						ENDIF;
+					ENDIF;
+					nK = nK + 1;
+				END;
+				IF(nCnt > 0);
+					sTxt = sE;
+					sOut = '';
+					IF(SCAN('''', sTxt) + SCAN('"', sTxt) + SCAN('\', sTxt) = 0);
+						sOut = sTxt;
+					ELSE;
+						nC = 1;
+						WHILE(nC <= LONG(sTxt));
+							sC = SUBST(sTxt, nC, 1);
+							sOut = sOut | IF(sC @= '''', '''''', IF(sC @= '"', '\"', IF(sC @= '\', '\\', sC)));
+							nC = nC + 1;
+						END;
+					ENDIF;
+					sBlk = 'vEl = ''' | sOut | ''';' | cNL | 'IF(DIMIX(cDim, vEl) > 0);' | cNL | sLine
+						| cTab | 'nPut = nPut + ' | NumberToString(nCnt) | ';' | cNL | 'ELSE;' | cNL | cTab | 'nSkip = nSkip + 1;' | cNL | 'ENDIF;' | cNL;
+					nVals = nVals + nCnt;
+				ENDIF;
+			ENDIF;
+
+			#---- write a part when full, and always at the end ----
+			IF((nE > nSize & (sEp @<> '' % nPart = 0)) % (sEp @<> '' & LONG(sEp) + LONG(sBlk) > cMax));
+				nPart = nPart + 1;
+				sPart = IF(nPart < 10, '0', '') | NumberToString(nPart);
+				sPName = cPrefix | sDim | '.' | sPart;
+				ExecuteProcess('}Sys.API.Encode', 'pText', sPName, 'pMode', 'json');
+				sPNameJs = gEnc;
+				sPro = '#Region ############################################# HEADER #############################################' | cNL
+					| '# Process: ' | sPNameJs | cNL
+					| '# Purpose: Load attribute values of dimension ' | sDimJs | ' (part ' | sPart | ').' | cNL
+					| '#          Generated by }Sys.Attr.Export from ' | cThisDB | ' - do not edit; re-run the export.' | cNL
+					| '#          Missing attributes are created; elements not in this database are skipped.' | cNL
+					| '# Date Created: ' | cToday | ' (ACGI)' | cNL
+					| '#EndRegion' | cNL | cNL
+					| 'cLogProc = ''PLOG'';' | cNL | 'cProc = GetProcessName;' | cNL | 'cDim = ''' | sDimJ | ''';' | cNL
+					| 'nOK = 1;' | cNL | 'nPut = 0;' | cNL | 'nSkip = 0;' | cNL
+					| 'ExecuteProcess(cLogProc, ''pFlag'', ''INIT'', ''pProc'', cProc);' | cNL
+					| 'IF(DimensionExists(cDim) = 0);' | cNL | cTab | 'nOK = 0;' | cNL
+					| cTab | 'ExecuteProcess(cLogProc, ''pFlag'', ''MSG'', ''pProc'', cProc, ''pMSG'', ''Dimension '' | cDim | '' not found - nothing loaded'');' | cNL
+					| cTab | 'ProcessBreak;' | cNL | 'ENDIF;' | cNL | sIns;
+				sEpi = 'IF(nOK = 1);' | cNL | sEp | 'ENDIF;' | cNL
+					| 'ExecuteProcess(cLogProc, ''pFlag'', ''MSG'', ''pProc'', cProc, ''pMSG'', NumberToString(nPut) | '' values loaded, '' | NumberToString(nSkip) | '' elements not found'');' | cNL
+					| 'ExecuteProcess(cLogProc, ''pFlag'', ''END'', ''pProc'', cProc, ''pMSG'', IF(nOK = 1, ''SUCCESS'', ''ERROR''));' | cNL;
+				sBody = '"HasSecurityAccess":false,"DataSource":{"Type":"None"},"Parameters":[],"PrologProcedure":"' | sPro | '","EpilogProcedure":"' | sEpi | '"';
+				IF(DIMIX('}Processes', sPName) > 0);
+					ExecuteProcess('}Sys.API.Encode', 'pText', sPName, 'pMode', 'key');
+					ExecuteProcess('}Sys.API.Request', 'pDB', '', 'pMethod', 'PATCH', 'pPath', '/Processes(''' | gEnc | ''')', 'pBody', '{' | sBody | '}', 'pAsync', 1);
+					sAct = 'update';
+				ELSE;
+					ExecuteProcess('}Sys.API.Request', 'pDB', '', 'pMethod', 'POST', 'pPath', '/Processes', 'pBody', '{"Name":"' | sPNameJs | '",' | sBody | '}', 'pAsync', 1);
+					sAct = 'create';
+				ENDIF;
+				ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG',
+					sPName | ': ' | sAct | ' queued (HTTP ' | NumberToString(gHttpCode) | '), ' | NumberToString(LONG(sEpi)) | ' chars');
+				IF(gHttpCode <> 202 & (gHttpCode < 200 % gHttpCode > 299));
+					sFail = sFail | IF(sFail @= '', '', '; ') | sPName | ' HTTP ' | NumberToString(gHttpCode) | ' ' | SUBST(gHttpBody, 1, 200);
+				ENDIF;
+				nLoaders = nLoaders + 1;
+				sEp = '';
+			ENDIF;
+			sEp = sEp | sBlk;
+			nE = nE + 1;
+		END;
+
+		#---- remove leftover parts from an earlier, larger export ----
+		nK = nPart + 1;
+		nMore = 1;
+		WHILE(nMore = 1 & nK <= 99);
+			sPName = cPrefix | sDim | '.' | IF(nK < 10, '0', '') | NumberToString(nK);
+			IF(DIMIX('}Processes', sPName) > 0);
+				ExecuteProcess('}Sys.API.Encode', 'pText', sPName, 'pMode', 'key');
+				ExecuteProcess('}Sys.API.Request', 'pDB', '', 'pMethod', 'DELETE', 'pPath', '/Processes(''' | gEnc | ''')', 'pAsync', 1);
+				ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', sPName | ': old part, delete queued');
+			ELSE;
+				nMore = 0;
+			ENDIF;
+			nK = nK + 1;
+		END;
+		ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', sDim | ': ' | NumberToString(nVals) | ' values in ' | NumberToString(nPart) | ' loader(s)');
+	ENDIF;
+	nDPos = SCAN(Char(1), sDimList);
+END;
+#EndRegion
+
+IF(sFail @<> '');
+	nError = 1;
+	sMessage = sFail;
+ENDIF;
+
+#endregion
+#region Epilog
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Beginning Epilog');
+
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG',
+	IF(nError = 1, sMessage, NumberToString(nDims) | ' dimensions, ' | NumberToString(nLoaders) | ' loader processes queued'));
+
+sStatus = IF(nCritical = 1, 'ERROR', 'SUCCESS');
+ExecuteProcess(cLogProc, 'pFlag', 'END', 'pProc', cProc, 'pMSG', sStatus);
+
+#endregion

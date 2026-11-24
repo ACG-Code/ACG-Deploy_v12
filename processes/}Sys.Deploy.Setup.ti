@@ -1,0 +1,336 @@
+#region Prolog
+#Region ############################################# HEADER #############################################
+# Process: }Sys.Deploy.Setup   (TI version of ACG-Deploy-Setup.py, PA SaaS)
+# Purpose: Install / complete the deployment system on this database. Safe to re-run: existing
+#          objects and values are kept, missing ones are added.
+#            Prerequisites: Process Log cubes (runs 'PLog - Build' if missing),
+#                           System - Admin Parameters (Base URL, Database Name, ...),
+#                           }API Control (Tenant ID, API Key)
+#            Dimensions : Deployments, Deployment - Items, mDeployments,
+#                         Deployment-Environments, mDeployment-Environments
+#            Cubes      : Deployment, Deployment Environments,
+#                         }PickList_Deployment, }PickList_Deployment Environments
+#            Settings   : System - Admin Parameters > Deployment Parameters
+#                         (max_workers, process_timeout); this tenant's connection values from
+#                         pThisDB / pBaseURL / pTenantID / pApiKey (blank = keep)
+#          Run }Sys.Deploy.Setup.Rules afterwards (rules + groups). It is not started from
+#          here: in v12 a child process holds up this process's commit.
+#          The API key is never logged.
+# Date Created: 2026.11.24 (ACGI)
+# Last Update: 2026.11.24
+# Notes:
+#     2026.11.24 (ACGI) - Initial Process Creation
+#     2026.11.24 (ACGI) - Tenant ID measure for cross-tenant targets
+#     2026.11.24 (ACGI) - Process Example standard + PLOG logging
+#     2026.11.24 (ACGI) - Creates its prerequisites for a fresh client install
+#     2026.11.24 (ACGI) - Process Log status (T08): ERROR only for critical errors
+#EndRegion
+
+#Region --------------- Constants ---------------
+cLogProc = 'PLOG';
+cProc = GetProcessName;
+cUser = NumberToString(DIMIX('}Clients', TM1USER));
+cTimestamp = TIMST(now, '\Y\m\d\h\i\s');
+cRandomInt = NumberToString(INT(RAND() * 1005));
+cView = '%cProc%.%cUser%.%cTimestamp%.%cRandomInt%';
+cTemp = 1;
+cAdm = 'System - Admin Parameters';
+cAdmMeas = 'mSystem - Admin Parameters';
+cAPI = '}API Control';
+cAPIDim = '}API_Control';
+cAPIMeas = '}mAPI_Control';
+cEnv = 'Deployment Environments';
+#EndRegion
+
+#Region --------------- Prerequisite: Process Log ---------------
+IF(CubeExists('Process Log') = 0);
+	ExecuteProcess('PLog - Build', 'pRunFlag', 'BUILD');
+ENDIF;
+#EndRegion
+
+#Region --------------- Initialize Logging ---------------
+sKeyMask = IF(pApiKey @= '', '(unchanged)', '****' | IF(LONG(pApiKey) >= 12, SUBST(pApiKey, LONG(pApiKey) - 3, 4), ''));
+ExecuteProcess(cLogProc, 'pFlag', 'INIT', 'pProc', cProc);
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pSourceDB=' | pSourceDB, 'pLine', 'P01');
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pTarget1DB=' | pTarget1DB, 'pLine', 'P02');
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pThisDB=' | pThisDB, 'pLine', 'P03');
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pBaseURL=' | pBaseURL, 'pLine', 'P04');
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pTenantID=' | pTenantID, 'pLine', 'P05');
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pApiKey=' | sKeyMask, 'pLine', 'P06');
+#EndRegion
+
+#Region --------------- Error Handling ---------------
+nError = 0;
+nCritical = 0;
+sMessage = '';
+
+IF(pBaseURL @<> '' & SUBST(LOWER(pBaseURL), 1, 8) @<> 'https://');
+	nError = 1;
+	sMessage = 'pBaseURL must start with https://';
+ELSEIF(SCAN(' ', pApiKey) > 0 % SCAN(' ', pTenantID) > 0);
+	nError = 1;
+	sMessage = 'pApiKey and pTenantID cannot contain spaces';
+ENDIF;
+
+IF(nError = 1);
+	ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', sMessage);
+	ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Critical errors, exiting');
+	nCritical = 1;
+	ProcessBreak;
+ENDIF;
+#EndRegion
+
+#Region --------------- Prerequisite: System - Admin Parameters ---------------
+IF(DimensionExists(cAdm) = 0);
+	DimensionCreate(cAdm);
+ENDIF;
+IF(DimensionElementExists(cAdm, 'Environment Parameters') = 0);
+	DimensionElementInsertDirect(cAdm, '', 'Environment Parameters', 'C');
+ENDIF;
+sList = 'Base URL|Database Type|Database Name|';
+nPos = SCAN('|', sList);
+WHILE(nPos > 0);
+	sEl = SUBST(sList, 1, nPos - 1);
+	sList = SUBST(sList, nPos + 1, LONG(sList) - nPos);
+	IF(DimensionElementExists(cAdm, sEl) = 0);
+		DimensionElementInsertDirect(cAdm, '', sEl, 'N');
+		DimensionElementComponentAddDirect(cAdm, 'Environment Parameters', sEl, 1);
+	ENDIF;
+	nPos = SCAN('|', sList);
+END;
+IF(DimensionExists(cAdmMeas) = 0);
+	DimensionCreate(cAdmMeas);
+ENDIF;
+IF(DimensionElementExists(cAdmMeas, 'String') = 0);
+	DimensionElementInsertDirect(cAdmMeas, '', 'String', 'S');
+ENDIF;
+IF(CubeExists(cAdm) = 0);
+	CubeCreate(cAdm, cAdm, cAdmMeas);
+ENDIF;
+#EndRegion
+
+#Region --------------- Prerequisite: }API Control ---------------
+IF(DimensionExists(cAPIDim) = 0);
+	DimensionCreate(cAPIDim);
+ENDIF;
+IF(DimensionElementExists(cAPIDim, 'Tenant ID') = 0);
+	DimensionElementInsertDirect(cAPIDim, '', 'Tenant ID', 'N');
+ENDIF;
+IF(DimensionElementExists(cAPIDim, 'API Key') = 0);
+	DimensionElementInsertDirect(cAPIDim, '', 'API Key', 'N');
+ENDIF;
+IF(DimensionExists(cAPIMeas) = 0);
+	DimensionCreate(cAPIMeas);
+ENDIF;
+IF(DimensionElementExists(cAPIMeas, 'String') = 0);
+	DimensionElementInsertDirect(cAPIMeas, '', 'String', 'S');
+ENDIF;
+IF(CubeExists(cAPI) = 0);
+	CubeCreate(cAPI, cAPIDim, cAPIMeas);
+ENDIF;
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Prerequisites ok');
+#EndRegion
+
+#Region --------------- Dimensions ---------------
+# Deployments: Deployment 1..24
+sDim = 'Deployments';
+IF(DimensionExists(sDim) = 0);
+	DimensionCreate(sDim);
+ENDIF;
+nI = 1;
+WHILE(nI <= 24);
+	sEl = 'Deployment ' | NumberToString(nI);
+	IF(DimensionElementExists(sDim, sEl) = 0);
+		DimensionElementInsertDirect(sDim, '', sEl, 'N');
+	ENDIF;
+	nI = nI + 1;
+END;
+
+# Deployment - Items: All Items > Item 1..49
+sDim = 'Deployment - Items';
+IF(DimensionExists(sDim) = 0);
+	DimensionCreate(sDim);
+ENDIF;
+IF(DimensionElementExists(sDim, 'All Items') = 0);
+	DimensionElementInsertDirect(sDim, '', 'All Items', 'C');
+ENDIF;
+nI = 1;
+WHILE(nI <= 49);
+	sEl = 'Item ' | NumberToString(nI);
+	IF(DimensionElementExists(sDim, sEl) = 0);
+		DimensionElementInsertDirect(sDim, '', sEl, 'N');
+	ENDIF;
+	IF(ElementIsComponent(sDim, sDim, sEl, 'All Items') = 0);
+		DimensionElementComponentAddDirect(sDim, 'All Items', sEl, 1);
+	ENDIF;
+	nI = nI + 1;
+END;
+
+# mDeployments (all string measures)
+sDim = 'mDeployments';
+IF(DimensionExists(sDim) = 0);
+	DimensionCreate(sDim);
+ENDIF;
+sList = 'Active|Type|Name|Owner|Source|Target 1|Target 2|Target 3|Target 4|Target 5|'
+	| 'Include Attribute Values|Copy Attribute Rules|Include Subsets|Include Security Cube|'
+	| 'Parameter 1|Parameter 2|Parameter 3|Parameter 4|Parameter 5|Parameter 6|Parameter 7|Parameter 8|Parameter 9|Parameter 10|'
+	| 'Timeout|Deployment Status|Deployment Start|Deployment End|Deployment Duration|';
+nPos = SCAN('|', sList);
+WHILE(nPos > 0);
+	sEl = SUBST(sList, 1, nPos - 1);
+	sList = SUBST(sList, nPos + 1, LONG(sList) - nPos);
+	IF(DimensionElementExists(sDim, sEl) = 0);
+		DimensionElementInsertDirect(sDim, '', sEl, 'S');
+	ENDIF;
+	nPos = SCAN('|', sList);
+END;
+
+# Deployment-Environments: Source, Target1..Target10
+sDim = 'Deployment-Environments';
+IF(DimensionExists(sDim) = 0);
+	DimensionCreate(sDim);
+ENDIF;
+IF(DimensionElementExists(sDim, 'Source') = 0);
+	DimensionElementInsertDirect(sDim, '', 'Source', 'N');
+ENDIF;
+nI = 1;
+WHILE(nI <= 10);
+	sEl = 'Target' | NumberToString(nI);
+	IF(DimensionElementExists(sDim, sEl) = 0);
+		DimensionElementInsertDirect(sDim, '', sEl, 'N');
+	ENDIF;
+	nI = nI + 1;
+END;
+
+# mDeployment-Environments (Tenant ID / Base URL / Secret route cross-tenant targets)
+sDim = 'mDeployment-Environments';
+IF(DimensionExists(sDim) = 0);
+	DimensionCreate(sDim);
+ENDIF;
+sList = 'Database Name|Reporting Instance|Address|Server Name|Tenant ID|Base URL|Secret|';
+nPos = SCAN('|', sList);
+WHILE(nPos > 0);
+	sEl = SUBST(sList, 1, nPos - 1);
+	sList = SUBST(sList, nPos + 1, LONG(sList) - nPos);
+	IF(DimensionElementExists(sDim, sEl) = 0);
+		DimensionElementInsertDirect(sDim, '', sEl, 'S');
+	ENDIF;
+	nPos = SCAN('|', sList);
+END;
+
+# System - Admin Parameters: Deployment Parameters
+sDim = cAdm;
+IF(DimensionElementExists(sDim, 'Deployment Parameters') = 0);
+	DimensionElementInsertDirect(sDim, '', 'Deployment Parameters', 'C');
+ENDIF;
+sList = 'max_workers|process_timeout|';
+nPos = SCAN('|', sList);
+WHILE(nPos > 0);
+	sEl = SUBST(sList, 1, nPos - 1);
+	sList = SUBST(sList, nPos + 1, LONG(sList) - nPos);
+	IF(DimensionElementExists(sDim, sEl) = 0);
+		DimensionElementInsertDirect(sDim, '', sEl, 'N');
+		DimensionElementComponentAddDirect(sDim, 'Deployment Parameters', sEl, 1);
+	ENDIF;
+	nPos = SCAN('|', sList);
+END;
+
+# leaf subset used by the Source/Target picklists
+IF(SubsetExists('Deployment-Environments', 'System - Leaves') = 0);
+	SubsetCreateByMDX('System - Leaves', '{TM1FILTERBYLEVEL({TM1SUBSETALL([Deployment-Environments])}, 0)}', 'Deployment-Environments', 0);
+ENDIF;
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Dimensions ok');
+#EndRegion
+
+#Region --------------- Cubes ---------------
+IF(CubeExists('Deployment') = 0);
+	CubeCreate('Deployment', 'Deployments', 'Deployment - Items', 'mDeployments');
+ENDIF;
+IF(CubeExists(cEnv) = 0);
+	CubeCreate(cEnv, 'Deployment-Environments', 'mDeployment-Environments');
+ENDIF;
+IF(CubeExists('}PickList_Deployment') = 0);
+	CubeCreate('}PickList_Deployment', 'Deployments', 'Deployment - Items', 'mDeployments', '}PickList');
+ENDIF;
+IF(CubeExists('}PickList_Deployment Environments') = 0);
+	CubeCreate('}PickList_Deployment Environments', 'Deployment-Environments', 'mDeployment-Environments', '}PickList');
+ENDIF;
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Cubes ok');
+#EndRegion
+
+#Region --------------- This tenant's connection values (blank = keep) ---------------
+IF(pThisDB @<> '');
+	CellPutS(pThisDB, cAdm, 'Database Name', 'String');
+ENDIF;
+IF(pBaseURL @<> '');
+	sURL = TRIM(pBaseURL);
+	WHILE(LONG(sURL) > 0);
+		IF(SUBST(sURL, LONG(sURL), 1) @= '/');
+			sURL = SUBST(sURL, 1, LONG(sURL) - 1);
+		ELSE;
+			BREAK;
+		ENDIF;
+	END;
+	CellPutS(sURL, cAdm, 'Base URL', 'String');
+ENDIF;
+IF(CellGetS(cAdm, 'Database Type', 'String') @= '');
+	CellPutS('PA SaaS', cAdm, 'Database Type', 'String');
+ENDIF;
+IF(pTenantID @<> '');
+	CellPutS(pTenantID, cAPI, 'Tenant ID', 'String');
+ENDIF;
+IF(pApiKey @<> '');
+	CellPutS(pApiKey, cAPI, 'API Key', 'String');
+	ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'API key ' | sKeyMask | ' saved');
+ENDIF;
+#EndRegion
+
+#Region --------------- Default settings (only if blank) ---------------
+IF(CellGetS(cAdm, 'max_workers', 'String') @= '');
+	CellPutS('10', cAdm, 'max_workers', 'String');
+ENDIF;
+IF(CellGetS(cAdm, 'process_timeout', 'String') @= '');
+	CellPutS('14400', cAdm, 'process_timeout', 'String');
+ENDIF;
+sSrc = IF(pSourceDB @= '', CellGetS(cAdm, 'Database Name', 'String'), pSourceDB);
+IF(CellGetS(cEnv, 'Source', 'Database Name') @= '');
+	CellPutS(sSrc, cEnv, 'Source', 'Database Name');
+ENDIF;
+IF(CellGetS(cEnv, 'Source', 'Reporting Instance') @= '');
+	CellPutS('Yes', cEnv, 'Source', 'Reporting Instance');
+ENDIF;
+IF(pTarget1DB @<> '' & CellGetS(cEnv, 'Target1', 'Database Name') @= '');
+	CellPutS(pTarget1DB, cEnv, 'Target1', 'Database Name');
+ENDIF;
+
+# tell the installer what is still missing
+sMissing = '';
+IF(CellGetS(cAdm, 'Base URL', 'String') @= '');
+	sMissing = sMissing | ' Base URL';
+ENDIF;
+IF(CellGetS(cAdm, 'Database Name', 'String') @= '');
+	sMissing = sMissing | ' Database Name';
+ENDIF;
+IF(CellGetS(cAPI, 'Tenant ID', 'String') @= '');
+	sMissing = sMissing | ' Tenant ID';
+ENDIF;
+IF(CellGetS(cAPI, 'API Key', 'String') @= '');
+	sMissing = sMissing | ' API Key';
+ENDIF;
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG',
+	IF(sMissing @= '', 'Settings ok', 'Settings ok - still needed before deploying:' | sMissing));
+#EndRegion
+
+#endregion
+#region Epilog
+ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Beginning Epilog');
+
+# Next step: run }Sys.Deploy.Setup.Rules separately (rules + groups).
+IF(nError = 0);
+	ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Model ready - now run }Sys.Deploy.Setup.Rules');
+ENDIF;
+
+sStatus = IF(nCritical = 1, 'ERROR', 'SUCCESS');
+ExecuteProcess(cLogProc, 'pFlag', 'END', 'pProc', cProc, 'pMSG', sStatus);
+
+#endregion

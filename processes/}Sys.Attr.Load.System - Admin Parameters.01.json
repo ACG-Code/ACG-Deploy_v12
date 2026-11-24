@@ -1,0 +1,12 @@
+{
+	"@type":"Process",
+	"Name":"}Sys.Attr.Load.System - Admin Parameters.01",
+	"HasSecurityAccess":false,
+	"Code@Code.link":"}Sys.Attr.Load.System - Admin Parameters.01.ti",
+	"DataSource":
+	{
+		"Type":"None"
+	},
+	"Parameters":[],
+	"Variables":[]
+}

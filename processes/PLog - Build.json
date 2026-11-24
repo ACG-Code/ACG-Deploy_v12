@@ -1,0 +1,20 @@
+{
+	"@type":"Process",
+	"Name":"PLog - Build",
+	"HasSecurityAccess":false,
+	"Code@Code.link":"PLog - Build.ti",
+	"DataSource":
+	{
+		"Type":"None"
+	},
+	"Parameters":
+	[
+		{
+			"Name":"pRunFlag",
+			"Prompt":"BUILD or DELETE the Process logs?",
+			"Value":"BUILD",
+			"Type":"String"
+		}
+	],
+	"Variables":[]
+}
