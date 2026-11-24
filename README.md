@@ -17,15 +17,15 @@ You list the objects to move in the **Deployment** cube, then run one process. T
 | --- | --- |
 | `processes/` | All the tool's TI processes (`.ti` code + `.json` definition), including the `PLog` logging framework |
 | `files/Metdata_PAW_v12.gz` | The Master Data Management PAW book |
-| `tm1project.json` | Which objects PAW Git pushes and pulls, and the tasks that run after a pull |
+| `tm1project.json` | Which objects PAW Git pushes and pulls, and the attribute export that runs before a push |
 
 API keys and connection values are **never** in this repository. They live only in the `}API Control` cube of each database.
 
 ## Installing on a new database
 
-1. In PAW, connect the database to this repository and **pull** the `feature_ACG-Deploy_v12` branch.
-   The post-pull tasks then run `}Sys.Deploy.Setup`, `}Sys.Deploy.Setup.Rules` and `}Sys.Attr.Load.All`.
-   On a new database, Setup.Rules stops with *"connection values missing"*. This is expected.
+A pull only brings in the objects. Nothing runs automatically afterwards, so setup is never attempted before this database's connection values are entered.
+
+1. In PAW, connect the database to this repository and **pull** the `main` branch.
 2. Run **`}Sys.Deploy.Setup`** with this database's connection values:
 
    | Parameter | Value |
@@ -36,10 +36,13 @@ API keys and connection values are **never** in this repository. They live only 
    | `pApiKey` | An API key for this tenant. It is only ever logged masked |
    | `pSourceDB`, `pTarget1DB` | Optional: database names for the Source and Target1 environments |
 
-   The log should end with **"Settings ok"**. A blank parameter keeps the value already stored.
-3. Run **`}Sys.Deploy.Setup.Rules`**. It first checks that the values above actually reach this database, and stops with an ERROR if they don't. It then sets the Deployment and picklist rules and creates the **Deploy_Admin** and **Deploy_User** groups. The changes appear a few seconds after it finishes.
-4. Add users to Deploy_Admin (manage environments and keys) and Deploy_User (run deployments).
-5. Register each target database (see below).
+   It creates the cubes and dimensions, and its log should end with **"Settings ok"**. A blank parameter keeps the value already stored, so check every field is filled in on the first run.
+3. Run **`}Sys.Attr.Load.All`** to restore the attribute values carried in the repository.
+4. Run **`}Sys.Deploy.Setup.Rules`**. It first checks that the values from step 2 actually reach this database, and stops with an ERROR naming the database if they don't. It then sets the Deployment and picklist rules and creates the **Deploy_Admin** and **Deploy_User** groups. The changes appear a few seconds after it finishes.
+5. Add users to Deploy_Admin (manage environments and keys) and Deploy_User (run deployments).
+6. Register each target database (see below).
+
+After a later pull that updates the tool, run step 3 again if attribute values changed, and steps 2 and 4 if the setup processes changed.
 
 Both setup processes are safe to re-run. They add what's missing and keep what's there.
 
@@ -87,7 +90,7 @@ Every process logs to the **Process Log** cube (and Process Log by User) through
 PAW Git moves objects, not data. To carry attribute values (such as `System - Admin Parameters`):
 
 - **Before a push**, `}Sys.Attr.Export` writes the values into `}Sys.Attr.Load.<dimension>.NN` processes, which are then pushed like any other process. It runs as a PrePush task.
-- **After a pull**, `}Sys.Attr.Load.All` runs every loader and restores the values.
+- **After a pull**, run `}Sys.Attr.Load.All`. It runs every loader and restores the values.
 
 ## Notes and limitations
 
