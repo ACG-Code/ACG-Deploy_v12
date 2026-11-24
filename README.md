@@ -1,6 +1,6 @@
 # ACG-Deploy v12 for Planning Analytics SaaS
 
-ACG-Deploy moves TM1 objects between Planning Analytics databases: dimensions, subsets, cubes, views, rules, processes and chores. It can also run TI processes on a target. Everything runs in TurboIntegrator through the TM1 v12 REST API (`ExecuteHttpRequest`). It needs no Python, no `ACG-Deploy.exe` and no `ExecuteCommand`, so it works on PA SaaS.
+ACG-Deploy moves TM1 objects between Planning Analytics databases: dimensions, subsets, cubes, views, rules, processes and chores. It can also run TI processes on a target. Everything runs in TurboIntegrator through the TM1 v12 REST API (`ExecuteHttpRequest`). 
 
 You list the objects to move in the **Deployment** cube, then run one process. That process copies each item to up to five targets and writes the result back to the cube.
 
