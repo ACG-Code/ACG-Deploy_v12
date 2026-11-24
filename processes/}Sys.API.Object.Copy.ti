@@ -15,9 +15,6 @@
 #     2026.11.24 (ACGI) - Initial Process Creation
 #     2026.11.24 (ACGI) - Process Example standard + PLOG logging
 #     2026.11.24 (ACGI) - Process Log status (T08): ERROR only for critical errors
-#     2026.11.24 (ACGI) - Definitions sent through gHttpReqBody, not pBody: over about 64K a
-#                         process parameter is refused, the call never ran and the earlier GET's
-#                         HTTP 200 was reported as success. gHttpCode reset before each write.
 #EndRegion
 
 #Region --------------- Constants ---------------
@@ -32,7 +29,6 @@ cProcSelect = '?$select=Name,HasSecurityAccess,PrologProcedure,MetadataProcedure
 cChoreSelect = '?$select=Name,StartTime,DSTSensitive,Active,ExecutionMode,Frequency&$expand=Tasks($select=Parameters;$expand=Process($select=Name))';
 NumericGlobalVariable('gHttpCode');
 StringGlobalVariable('gHttpBody');
-StringGlobalVariable('gHttpReqBody');
 StringGlobalVariable('gEnc');
 NumericGlobalVariable('gDeployOK');
 StringGlobalVariable('gDeployMsg');
@@ -83,19 +79,16 @@ IF(pType @= 'Process');
 		sBody = gHttpBody;
 		ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Source definition ' | NumberToString(LONG(sBody)) | ' chars');
 		ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'GET', 'pPath', sPath | '?$select=Name');
-		nExists = IF(gHttpCode = 200, 1, 0);
-		gHttpReqBody = sBody;
-		gHttpCode = 0;
-		IF(nExists = 1);
-			ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'PATCH', 'pPath', sPath, 'pBody', '');
+		IF(gHttpCode = 200);
+			ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'PATCH', 'pPath', sPath, 'pBody', sBody);
 			sAction = 'updated';
 		ELSE;
-			ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'POST', 'pPath', '/Processes', 'pBody', '');
+			ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'POST', 'pPath', '/Processes', 'pBody', sBody);
 			sAction = 'created';
 		ENDIF;
 		IF(gHttpCode < 200 % gHttpCode > 299);
 			nError = 1;
-			sMessage = 'process ' | sAction | ' failed (HTTP ' | NumberToString(gHttpCode) | '): ' | SUBST(gHttpBody, 1, 1000);
+			sMessage = 'process ' | sAction | ' failed (HTTP ' | NumberToString(gHttpCode) | '): ' | gHttpBody;
 		ELSE;
 			sResult = 'process ' | sAction;
 			ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'POST', 'pPath', sPath | '/tm1.Compile', 'pBody', '{}');
@@ -118,15 +111,14 @@ IF(pType @= 'Rule');
 	ELSEIF(SCAN('"Rules":null', gHttpBody) > 0 % SCAN('"Rules":""', gHttpBody) > 0);
 		sResult = 'no rules on source - skipped';
 	ELSE;
-		gHttpReqBody = gHttpBody;
-		gHttpCode = 0;
-		ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'PATCH', 'pPath', sPath, 'pBody', '');
+		sBody = gHttpBody;
+		ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'PATCH', 'pPath', sPath, 'pBody', sBody);
 		IF(gHttpCode = 404);
 			nError = 1;
 			sMessage = 'cube does not exist on target';
 		ELSEIF(gHttpCode < 200 % gHttpCode > 299);
 			nError = 1;
-			sMessage = 'rules failed (HTTP ' | NumberToString(gHttpCode) | '): ' | SUBST(gHttpBody, 1, 1000);
+			sMessage = 'rules failed (HTTP ' | NumberToString(gHttpCode) | '): ' | gHttpBody;
 		ELSE;
 			sResult = 'rules updated';
 			ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'POST', 'pPath', sPath | '/tm1.CheckRules', 'pBody', '{}');
@@ -175,12 +167,10 @@ IF(pType @= 'Chore');
 			ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'DELETE', 'pPath', sPath);
 			ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Existing chore deleted on target HTTP ' | NumberToString(gHttpCode));
 		ENDIF;
-		gHttpReqBody = sBody;
-		gHttpCode = 0;
-		ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'POST', 'pPath', '/Chores', 'pBody', '');
+		ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'POST', 'pPath', '/Chores', 'pBody', sBody);
 		IF(gHttpCode < 200 % gHttpCode > 299);
 			nError = 1;
-			sMessage = 'chore create failed (HTTP ' | NumberToString(gHttpCode) | '): ' | SUBST(gHttpBody, 1, 1000);
+			sMessage = 'chore create failed (HTTP ' | NumberToString(gHttpCode) | '): ' | gHttpBody;
 		ELSE;
 			sResult = 'chore copied (inactive)';
 			IF(nActive = 1);
