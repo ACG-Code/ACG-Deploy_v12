@@ -6,7 +6,7 @@
 #     Master audit logging of all executed processes. Called by other TI processes at start (INIT),
 #     throughout (MSG) and at completion (END) to write to the Process Log and Process Log by User cubes.
 # Date Created: 2021-01-18 B. Cave (ACGI)
-# Last Update: 2026-09-28 C.Harvey (ACGI)
+# Last Update: 2026-11-24 C.Harvey (ACGI)
 # Notes: 
 #     2021-01-18 B. Cave (ACGI) - Initial Process Creation
 #     2026-09-28 C.Harvey (ACGI) - Fixed INIT failing on every run once any log for the process reached
@@ -20,25 +20,11 @@
 #                                - Fixed }Clients 'Name' attribute check; sUserName initialised
 #                                - Runtime shows days when longer than 24 hours
 #                                - Validation failures now write to the server log
-#EndRegion
-
-#Region ############################################# USAGE ##############################################
-# Parameters (all string):
-#     pFlag - INIT = start a fresh log for pProc (shifts prior runs down the stack)
-#             MSG  = write an audit line to the Current log
-#             END  = close out the Current log
-#     pProc - Name of the executing process being logged (must exist in }Processes)
-#     pMsg  - MSG: message text  |  END: final status (e.g. 'SUCCESS', 'FAILED: <reason>')
-#     pLine - Optional T01-T09 / P01-P09 line to write pMsg into directly (no timestamp, counter unchanged)
-#
-# Setting lines (Process Log Line):
-#     T01 Process   T02 User      T03 Start date   T04 Start time
-#     T05 End date (holds the start-time serial while running)
-#     T06 End time  T07 Runtime   T08 Status       T09 Last audit line number used
-#     P01-P09 Caller-defined parameter values
-#
-# Object assumptions:
-#     'Current' is element 1 of Process Log Run; numbered audit lines are named '1', '2', '3', ...
+#     2026-11-24 C.Harvey (ACGI) - Global gPLogOff = 1 turns logging off for the calling chain. Set by
+#                                  parallel jobs (}Sys.Deploy.Job): copies of one process running at
+#                                  once would overwrite each other's Current log. Off = pFlag 'OFF',
+#                                  which writes nothing; not ProcessQuit, because in v12 a child that
+#                                  quits gives its caller minor errors.
 #EndRegion
 
 #Region --------------- Object & process names (revise on a client-by-client basis as needed!) ---------------
@@ -58,7 +44,13 @@ nStartTime1 = NOW;
 pFlag = UPPER( TRIM( pFlag ) );
 pLine = UPPER( TRIM( pLine ) );
 
-IF( pFlag @<> 'INIT'  &  pFlag @<> 'MSG'  &  pFlag @<> 'END' );
+#=== Logging switched off by the caller (parallel jobs): nothing below writes for pFlag 'OFF'
+NumericGlobalVariable( 'gPLogOff' );
+IF( gPLogOff = 1 );
+     pFlag = 'OFF';
+EndIF;
+
+IF( pFlag @<> 'INIT'  &  pFlag @<> 'MSG'  &  pFlag @<> 'END'  &  pFlag @<> 'OFF' );
      LogOutput( 'ERROR', sPLogTI | ': invalid pFlag "' | pFlag | '" for process "' | pProc | '"' );
      ProcessQuit;
 EndIF;
