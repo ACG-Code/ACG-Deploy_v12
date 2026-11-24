@@ -1,0 +1,34 @@
+#region Prolog
+# temporary read-only check of Target1 (GitDemo-Prod)
+NumericGlobalVariable('gHttpCode');
+StringGlobalVariable('gHttpBody');
+StringGlobalVariable('gEnc');
+cP = GetProcessName;
+ExecuteProcess('PLOG', 'pFlag', 'INIT', 'pProc', cP);
+
+ExecuteProcess('}Sys.API.Request', 'pDB', 'Target1', 'pMethod', 'GET', 'pPath', '/Cubes(''Deployment'')?$select=Rules');
+ExecuteProcess('PLOG', 'pFlag', 'MSG', 'pProc', cP, 'pMSG', 'Deployment rules ' | NumberToString(gHttpCode) | ' len=' | NumberToString(LONG(gHttpBody)) | ' owner=' | NumberToString(SCAN('Owner', gHttpBody)) | ' runti=' | NumberToString(SCAN('RunTI', gHttpBody)));
+
+ExecuteProcess('}Sys.API.Request', 'pDB', 'Target1', 'pMethod', 'GET', 'pPath', '/Cubes(''%7DPickList_Deployment'')?$select=Rules');
+ExecuteProcess('PLOG', 'pFlag', 'MSG', 'pProc', cP, 'pMSG', 'PickList rules ' | NumberToString(gHttpCode) | ' len=' | NumberToString(LONG(gHttpBody)) | ' static=' | NumberToString(SCAN('Static:Yes:No', gHttpBody)));
+
+ExecuteProcess('}Sys.API.Request', 'pDB', 'Target1', 'pMethod', 'GET', 'pPath', '/Groups?$select=Name');
+ExecuteProcess('PLOG', 'pFlag', 'MSG', 'pProc', cP, 'pMSG', 'Groups ' | NumberToString(gHttpCode) | ' admin=' | NumberToString(SCAN('"Deploy_Admin"', gHttpBody)) | ' user=' | NumberToString(SCAN('"Deploy_User"', gHttpBody)));
+
+sMdx = 'SELECT NON EMPTY {[Process Log Line].[T08],[Process Log Line].[4],[Process Log Line].[5],[Process Log Line].[6],[Process Log Line].[7],[Process Log Line].[8],[Process Log Line].[9],[Process Log Line].[10]} ON 0, {[Process Log Run].[Current]} ON 1 FROM [Process Log] WHERE ([}Processes].[}Sys.Deploy.Setup.Rules])';
+ExecuteProcess('}Sys.API.Encode', 'pText', sMdx, 'pMode', 'json');
+ExecuteProcess('}Sys.API.Request', 'pDB', 'Target1', 'pMethod', 'POST', 'pPath', '/ExecuteMDX?$expand=Cells($select=Value)', 'pBody', '{"MDX":"' | gEnc | '"}');
+nV = SCAN('"Cells"', gHttpBody);
+sOut = IF(nV > 0, SUBST(gHttpBody, nV, 1200), SUBST(gHttpBody, 1, 300));
+nI = 0;
+WHILE(LONG(sOut) > 0 & nI < 5);
+	ExecuteProcess('PLOG', 'pFlag', 'MSG', 'pProc', cP, 'pMSG', 'Rules log ' | SUBST(sOut, 1, 240));
+	sOut = SUBST(sOut, 241, LONG(sOut));
+	nI = nI + 1;
+END;
+
+#endregion
+#region Epilog
+ExecuteProcess('PLOG', 'pFlag', 'END', 'pProc', GetProcessName, 'pMSG', 'SUCCESS');
+
+#endregion
