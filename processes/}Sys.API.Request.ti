@@ -8,19 +8,29 @@
 #          Database Name, Base URL (blank = this tenant's), Tenant ID (blank =
 #          this tenant's), Secret = element of }API_Control holding its API key
 #          (blank = this tenant's key)
+#  Body: pBody, or - for bodies too long for a process parameter (about 64K) -
+#        set StringGlobalVariable('gHttpReqBody') before the call and pass pBody ''.
+#        gHttpReqBody is cleared by every call, so it is never sent twice.
 # Results are returned in global variables:
 #   NumericGlobalVariable('gHttpCode');  StringGlobalVariable('gHttpBody');
 #   StringGlobalVariable('gHttpLocation')  (pAsync = 1: e.g. _async('id'))
 # Responses are requested without @odata annotations.
 # Settings: 'System - Admin Parameters' (Base URL, Database Name)
 #           '}API Control' (Tenant ID, API Key, other environments' keys)
+# 2026.11.24 (ACGI) - gHttpReqBody for long bodies (Dim.Copy of large dimensions)
 #****************************************************************
 NumericGlobalVariable('gHttpCode');
 StringGlobalVariable('gHttpBody');
 StringGlobalVariable('gHttpLocation');
+StringGlobalVariable('gHttpReqBody');
 gHttpCode = 0;
 gHttpBody = '';
 gHttpLocation = '';
+sBody = pBody;
+IF(sBody @= '');
+  sBody = gHttpReqBody;
+ENDIF;
+gHttpReqBody = '';
 
 cAdm = 'System - Admin Parameters';
 cAPI = '}API Control';
@@ -80,10 +90,10 @@ sCT   = '-h Content-Type:application/json';
 sAcc  = '-h Accept:application/json;odata.metadata=none';
 sPref = IF(pAsync = 1, '-h Prefer:respond-async', '-h Prefer:return=representation');
 
-IF(pBody @= '');
+IF(sBody @= '');
   ExecuteHttpRequest(pMethod, sURL, sAuth, sCT, sAcc, sPref);
 ELSE;
-  ExecuteHttpRequest(pMethod, sURL, sAuth, sCT, sAcc, sPref, '-d ' | pBody);
+  ExecuteHttpRequest(pMethod, sURL, sAuth, sCT, sAcc, sPref, '-d ' | sBody);
 ENDIF;
 
 gHttpCode = HttpResponseGetStatusCode();
@@ -95,7 +105,7 @@ ENDIF;
 IF(pLog = 1);
   DatasourceASCIIQuoteCharacter = '';
   sLog = 'Raw_Reports/Sys.API.Request.md';
-  ASCIIOutput(sLog, pMethod | ' ' | sDB | IF(sEnv @= '', '', ' (' | sEnv | ' @ ' | sHost | ' / ' | sTenant | ')') | pPath);
+  ASCIIOutput(sLog, pMethod | ' ' | sDB | IF(sEnv @= '', '', ' (' | sEnv | ' @ ' | sHost | ' / ' | sTenant | ')') | pPath | IF(sBody @= '', '', ' (body ' | NumberToString(LONG(sBody)) | ' chars)'));
   ASCIIOutput(sLog, 'HTTP ' | NumberToString(gHttpCode) | IF(pAsync = 1, ' Location=' | gHttpLocation, ''));
   ASCIIOutput(sLog, gHttpBody);
 ENDIF;

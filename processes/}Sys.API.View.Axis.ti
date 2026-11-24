@@ -8,10 +8,14 @@
 #   MDX subset   -> "Subset":{"Hierarchy@odata.bind":..,"Expression":..}
 #   element list -> "Subset":{"Hierarchy@odata.bind":..,"Elements@odata.bind":[..]}
 #   title        -> + "Selected@odata.bind"
+# Input: pBody, or - when longer than a process parameter allows (about 64K) -
+#        StringGlobalVariable('gAxisIn') with pBody ''. gAxisIn is cleared by every call.
 # Returns StringGlobalVariable('gAxis') (JSON array), StringGlobalVariable('gAxisErr')
+# 2026.11.24 (ACGI) - gAxisIn for long axes
 #****************************************************************
 StringGlobalVariable('gAxis');
 StringGlobalVariable('gAxisErr');
+StringGlobalVariable('gAxisIn');
 StringGlobalVariable('gEnc');
 NumericGlobalVariable('gDeployOK');
 StringGlobalVariable('gDeployMsg');
@@ -19,6 +23,10 @@ gAxis = '';
 gAxisErr = '';
 
 s = pBody;
+IF(s @= '');
+  s = gAxisIn;
+ENDIF;
+gAxisIn = '';
 sItems = '';
 p = Scan('"Subset":{', s);
 WHILE(p > 0);
