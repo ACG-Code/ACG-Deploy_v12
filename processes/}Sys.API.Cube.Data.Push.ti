@@ -6,8 +6,6 @@
 #          POST /Cubes('x')/tm1.Update. Zeros, consolidations (unless pAllElements = 1) and
 #          rule-calculated values are skipped. Up to 20 dimensions.
 #          Used for attribute cubes, }ElementSecurity_ cubes and small/medium cubes.
-#          Slice (parallel deployment): pSliceDim + pSliceNo + pSliceCount > 1 copy only the
-#          leaves of pSliceDim at positions pSliceNo, pSliceNo + pSliceCount, ... (leaf order).
 #          Returns NumericGlobalVariable('gDeployOK') and StringGlobalVariable('gDeployMsg').
 # Date Created: 2026.11.24 (ACGI)
 # Last Update: 2026.11.24
@@ -15,7 +13,6 @@
 #     2026.11.24 (ACGI) - Initial Process Creation
 #     2026.11.24 (ACGI) - Process Example standard + PLOG logging; status in gDeployOK
 #     2026.11.24 (ACGI) - Process Log status (T08): ERROR only for critical errors
-#     2026.11.24 (ACGI) - pSliceDim / pSliceNo / pSliceCount for parallel slices
 #EndRegion
 
 #Region --------------- Constants ---------------
@@ -42,7 +39,6 @@ ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pTargetDB=' | 
 ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pAllElements=' | NumberToString(pAllElements), 'pLine', 'P03');
 ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pClear=' | NumberToString(pClear), 'pLine', 'P04');
 ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pBatch=' | NumberToString(pBatch), 'pLine', 'P05');
-ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'pSliceDim=' | pSliceDim | ' pSliceNo=' | NumberToString(pSliceNo) | ' pSliceCount=' | NumberToString(pSliceCount), 'pLine', 'P06');
 #EndRegion
 
 #Region --------------- Error Handling ---------------
@@ -50,7 +46,6 @@ nError = 0;
 nCritical = 0;
 sMessage = '';
 sResult = '';
-nSlice = IF(pSliceDim @<> '' & pSliceCount > 1, 1, 0);
 
 IF(CubeExists(pCube) = 0);
 	nError = 1;
@@ -61,24 +56,6 @@ ELSEIF(CubeDimensionCountGet(pCube) > 20);
 ELSEIF(pTargetDB @= '');
 	nError = 1;
 	sMessage = 'pTargetDB is required';
-ELSEIF(nSlice = 1 & (pSliceNo < 1 % pSliceNo > pSliceCount));
-	nError = 1;
-	sMessage = 'pSliceNo must be 1..' | NumberToString(pSliceCount);
-ENDIF;
-
-IF(nError = 0 & nSlice = 1);
-	nFound = 0;
-	nD = 1;
-	WHILE(nD <= CubeDimensionCountGet(pCube));
-		IF(UPPER(TABDIM(pCube, nD)) @= UPPER(pSliceDim));
-			nFound = 1;
-		ENDIF;
-		nD = nD + 1;
-	END;
-	IF(nFound = 0);
-		nError = 1;
-		sMessage = 'pSliceDim "' | pSliceDim | '" is not a dimension of ' | pCube;
-	ENDIF;
 ENDIF;
 
 IF(nError = 0);
@@ -145,45 +122,25 @@ IF(ViewExists(pCube, sView) = 1);
 	ViewDestroy(pCube, sView);
 ENDIF;
 ViewCreate(pCube, sView, cTemp);
-nSliceLeaves = 0;
 nD = 1;
 WHILE(nD <= nDims);
 	sDim = TABDIM(pCube, nD);
+	sDimMDX = '';
+	nC = 1;
+	WHILE(nC <= LONG(sDim));
+		sC = SUBST(sDim, nC, 1);
+		sDimMDX = sDimMDX | IF(sC @= ']', ']]', sC);
+		nC = nC + 1;
+	END;
+	IF(pAllElements = 1);
+		sMDX = '{TM1SUBSETALL([' | sDimMDX | '])}';
+	ELSE;
+		sMDX = '{TM1FILTERBYLEVEL({TM1SUBSETALL([' | sDimMDX | '])}, 0)}';
+	ENDIF;
 	IF(SubsetExists(sDim, sView) = 1);
 		SubsetDestroy(sDim, sView);
 	ENDIF;
-	IF(nSlice = 1 & UPPER(sDim) @= UPPER(pSliceDim));
-		# this slice: every pSliceCount-th leaf, starting at leaf pSliceNo
-		SubsetCreate(sDim, sView, cTemp);
-		nLeaf = 0;
-		nE = 1;
-		nMaxE = DIMSIZ(sDim);
-		WHILE(nE <= nMaxE);
-			sEl = DIMNM(sDim, nE);
-			IF(ELLEV(sDim, sEl) = 0);
-				nLeaf = nLeaf + 1;
-				IF(MOD(nLeaf - 1, pSliceCount) + 1 = pSliceNo);
-					nSliceLeaves = nSliceLeaves + 1;
-					SubsetElementInsert(sDim, sView, sEl, nSliceLeaves);
-				ENDIF;
-			ENDIF;
-			nE = nE + 1;
-		END;
-	ELSE;
-		sDimMDX = '';
-		nC = 1;
-		WHILE(nC <= LONG(sDim));
-			sC = SUBST(sDim, nC, 1);
-			sDimMDX = sDimMDX | IF(sC @= ']', ']]', sC);
-			nC = nC + 1;
-		END;
-		IF(pAllElements = 1);
-			sMDX = '{TM1SUBSETALL([' | sDimMDX | '])}';
-		ELSE;
-			sMDX = '{TM1FILTERBYLEVEL({TM1SUBSETALL([' | sDimMDX | '])}, 0)}';
-		ENDIF;
-		SubsetCreateByMDX(sView, sMDX, sDim, cTemp);
-	ENDIF;
+	SubsetCreateByMDX(sView, sMDX, sDim, cTemp);
 	ViewSubsetAssign(pCube, sView, sDim, sView);
 	nD = nD + 1;
 END;
@@ -191,14 +148,9 @@ ViewExtractSkipZeroesSet(pCube, sView, 1);
 ViewExtractSkipCalcsSet(pCube, sView, IF(pAllElements = 1, 0, 1));
 ViewExtractSkipRuleValuesSet(pCube, sView, 1);
 
-IF(nSlice = 1 & nSliceLeaves = 0);
-	# more slices than leaves: nothing to copy in this one
-	DatasourceType = 'NULL';
-ELSE;
-	DatasourceType = 'VIEW';
-	DatasourceNameForServer = pCube;
-	DatasourceCubeView = sView;
-ENDIF;
+DatasourceType = 'VIEW';
+DatasourceNameForServer = pCube;
+DatasourceCubeView = sView;
 #EndRegion
 
 #endregion

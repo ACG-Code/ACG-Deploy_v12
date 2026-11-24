@@ -19,9 +19,6 @@
 #     2026.11.24 (ACGI) - Initial Process Creation
 #     2026.11.24 (ACGI) - Process Example standard + PLOG logging; children checked via gDeployOK
 #     2026.11.24 (ACGI) - Process Log status (T08): ERROR only for critical errors
-#     2026.11.24 (ACGI) - Structure bodies sent through gHttpReqBody, not pBody: a dimension's JSON
-#                         is longer than a process parameter allows (about 64K, roughly 1,000
-#                         elements), and the call then never ran. gHttpCode reset before each call.
 #EndRegion
 
 #Region --------------- Constants ---------------
@@ -36,7 +33,6 @@ cHierExp = '$select=Name;$expand=Elements($select=Name,Type),Edges($select=Paren
 cHierExpQ = '?$select=Name&$expand=Elements($select=Name,Type),Edges($select=ParentName,ComponentName,Weight)';
 NumericGlobalVariable('gHttpCode');
 StringGlobalVariable('gHttpBody');
-StringGlobalVariable('gHttpReqBody');
 StringGlobalVariable('gEnc');
 NumericGlobalVariable('gDeployOK');
 StringGlobalVariable('gDeployMsg');
@@ -103,23 +99,18 @@ ENDIF;
 #EndRegion
 
 #Region --------------- 1. Structure ---------------
-# bodies go through gHttpReqBody (see header); gHttpCode = 0 first so a call that never ran shows as HTTP 0
 ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'GET', 'pPath', sDimURL | '?$select=Name');
 IF(gHttpCode = 404);
-	gHttpCode = 0;
 	ExecuteProcess('}Sys.API.Request', 'pDB', '', 'pMethod', 'GET', 'pPath', sDimURL | '?$select=Name&$expand=Hierarchies(' | cHierExp | ')');
 	IF(gHttpCode <> 200);
 		nError = 1;
-		sMessage = 'read failed (HTTP ' | NumberToString(gHttpCode) | '): ' | SUBST(gHttpBody, 1, 500);
+		sMessage = 'read failed (HTTP ' | NumberToString(gHttpCode) | '): ' | gHttpBody;
 		ProcessBreak;
 	ENDIF;
-	nBodyLen = LONG(gHttpBody);
-	gHttpReqBody = gHttpBody;
-	gHttpCode = 0;
-	ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'POST', 'pPath', '/Dimensions', 'pBody', '');
+	ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'POST', 'pPath', '/Dimensions', 'pBody', gHttpBody);
 	IF(gHttpCode <> 201);
 		nError = 1;
-		sMessage = 'create failed (HTTP ' | NumberToString(gHttpCode) | ', body ' | NumberToString(nBodyLen) | ' chars): ' | SUBST(gHttpBody, 1, 500);
+		sMessage = 'create failed (HTTP ' | NumberToString(gHttpCode) | '): ' | gHttpBody;
 		ProcessBreak;
 	ENDIF;
 	sResult = 'dimension created';
@@ -132,7 +123,6 @@ ELSEIF(gHttpCode = 200);
 		sRest = SUBST(sRest, nPos + 1, LONG(sRest) - nPos);
 		ExecuteProcess('}Sys.API.Encode', 'pText', sH, 'pMode', 'key');
 		sHierURL = sDimURL | '/Hierarchies(''' | gEnc | ''')';
-		gHttpCode = 0;
 		ExecuteProcess('}Sys.API.Request', 'pDB', '', 'pMethod', 'GET', 'pPath', sHierURL | cHierExpQ);
 		IF(gHttpCode <> 200);
 			nError = 1;
@@ -141,20 +131,17 @@ ELSEIF(gHttpCode = 200);
 		ENDIF;
 		sJSON = gHttpBody;
 		ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'GET', 'pPath', sHierURL | '?$select=Name');
-		nExists = IF(gHttpCode = 200, 1, 0);
-		gHttpReqBody = sJSON;
-		gHttpCode = 0;
-		IF(nExists = 1);
-			ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'PATCH', 'pPath', sHierURL, 'pBody', '');
+		IF(gHttpCode = 200);
+			ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'PATCH', 'pPath', sHierURL, 'pBody', sJSON);
 			sAction = 'updated';
 		ELSE;
-			ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'POST', 'pPath', sDimURL | '/Hierarchies', 'pBody', '');
+			ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'POST', 'pPath', sDimURL | '/Hierarchies', 'pBody', sJSON);
 			sAction = 'created';
 		ENDIF;
 		ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', 'Hierarchy ' | sH | ' ' | sAction | ' HTTP ' | NumberToString(gHttpCode));
 		IF(gHttpCode < 200 % gHttpCode > 299);
 			nError = 1;
-			sMessage = 'hierarchy ' | sH | ' ' | sAction | ' failed (HTTP ' | NumberToString(gHttpCode) | ', body ' | NumberToString(LONG(sJSON)) | ' chars): ' | SUBST(gHttpBody, 1, 500);
+			sMessage = 'hierarchy ' | sH | ' ' | sAction | ' failed (HTTP ' | NumberToString(gHttpCode) | '): ' | gHttpBody;
 			ProcessBreak;
 		ENDIF;
 		nH = nH + 1;
@@ -163,7 +150,7 @@ ELSEIF(gHttpCode = 200);
 	sResult = NumberToString(nH) | ' hierarchies updated';
 ELSE;
 	nError = 1;
-	sMessage = 'target check failed (HTTP ' | NumberToString(gHttpCode) | '): ' | SUBST(gHttpBody, 1, 500);
+	sMessage = 'target check failed (HTTP ' | NumberToString(gHttpCode) | '): ' | gHttpBody;
 	ProcessBreak;
 ENDIF;
 ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', sResult);

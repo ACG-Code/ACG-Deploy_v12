@@ -14,10 +14,6 @@
 #     2026.11.24 (ACGI) - Initial Process Creation
 #     2026.11.24 (ACGI) - Process Example standard + PLOG logging
 #     2026.11.24 (ACGI) - Process Log status (T08): ERROR only for critical errors
-#     2026.11.24 (ACGI) - Axes passed to View.Axis through gAxisIn and the view sent through
-#                         gHttpReqBody, not process parameters: over about 64K the call never ran
-#                         (after the target view was deleted) and an earlier HTTP code was
-#                         reported. gHttpCode reset before the POST.
 #EndRegion
 
 #Region --------------- Constants ---------------
@@ -31,11 +27,9 @@ cTemp = 1;
 cSubExp = '?$expand=Subset($select=Name,Expression;$expand=Hierarchy($select=Name;$expand=Dimension($select=Name)),Elements($select=Name))';
 NumericGlobalVariable('gHttpCode');
 StringGlobalVariable('gHttpBody');
-StringGlobalVariable('gHttpReqBody');
 StringGlobalVariable('gEnc');
 StringGlobalVariable('gAxis');
 StringGlobalVariable('gAxisErr');
-StringGlobalVariable('gAxisIn');
 NumericGlobalVariable('gDeployOK');
 StringGlobalVariable('gDeployMsg');
 #EndRegion
@@ -118,26 +112,17 @@ ELSE;
 	sKind = 'native';
 	sFail = '';
 	ExecuteProcess('}Sys.API.Request', 'pDB', '', 'pMethod', 'GET', 'pPath', sViewPath | '/tm1.NativeView/Columns' | cSubExp);
-	gAxisIn = gHttpBody;
-	gAxis = '';
-	ExecuteProcess('}Sys.API.View.Axis', 'pBody', '', 'pTargetDB', pTargetDB, 'pTitles', 0);
+	ExecuteProcess('}Sys.API.View.Axis', 'pBody', gHttpBody, 'pTargetDB', pTargetDB, 'pTitles', 0);
 	sCols = gAxis;
 	sFail = gAxisErr;
 	ExecuteProcess('}Sys.API.Request', 'pDB', '', 'pMethod', 'GET', 'pPath', sViewPath | '/tm1.NativeView/Rows' | cSubExp);
-	gAxisIn = gHttpBody;
-	gAxis = '';
-	ExecuteProcess('}Sys.API.View.Axis', 'pBody', '', 'pTargetDB', pTargetDB, 'pTitles', 0);
+	ExecuteProcess('}Sys.API.View.Axis', 'pBody', gHttpBody, 'pTargetDB', pTargetDB, 'pTitles', 0);
 	sRows = gAxis;
 	sFail = sFail | IF(sFail @<> '' & gAxisErr @<> '', '; ', '') | gAxisErr;
 	ExecuteProcess('}Sys.API.Request', 'pDB', '', 'pMethod', 'GET', 'pPath', sViewPath | '/tm1.NativeView/Titles' | cSubExp | ',Selected($select=Name)');
-	gAxisIn = gHttpBody;
-	gAxis = '';
-	ExecuteProcess('}Sys.API.View.Axis', 'pBody', '', 'pTargetDB', pTargetDB, 'pTitles', 1);
+	ExecuteProcess('}Sys.API.View.Axis', 'pBody', gHttpBody, 'pTargetDB', pTargetDB, 'pTitles', 1);
 	sTitles = gAxis;
 	sFail = sFail | IF(sFail @<> '' & gAxisErr @<> '', '; ', '') | gAxisErr;
-	IF(sFail @= '' & (sCols @= '' % sRows @= '' % sTitles @= ''));
-		sFail = 'an axis could not be read';
-	ENDIF;
 	IF(sFail @<> '');
 		nError = 1;
 		sMessage = sFail;
@@ -180,12 +165,10 @@ IF(gHttpCode = 200);
 	ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'DELETE', 'pPath', sViewPath);
 	sAction = 'replaced';
 ENDIF;
-gHttpReqBody = sBody;
-gHttpCode = 0;
-ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'POST', 'pPath', sCubePath | '/Views', 'pBody', '');
+ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'POST', 'pPath', sCubePath | '/Views', 'pBody', sBody);
 IF(gHttpCode < 200 % gHttpCode > 299);
 	nError = 1;
-	sMessage = sKind | ' view ' | sAction | ' failed (HTTP ' | NumberToString(gHttpCode) | '): ' | SUBST(gHttpBody, 1, 1000);
+	sMessage = sKind | ' view ' | sAction | ' failed (HTTP ' | NumberToString(gHttpCode) | '): ' | gHttpBody;
 ELSE;
 	sResult = sKind | ' view ' | sAction;
 ENDIF;

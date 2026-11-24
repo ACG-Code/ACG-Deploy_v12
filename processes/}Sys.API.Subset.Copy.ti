@@ -12,10 +12,6 @@
 #     2026.11.24 (ACGI) - Initial Process Creation
 #     2026.11.24 (ACGI) - Process Example standard + PLOG logging
 #     2026.11.24 (ACGI) - Process Log status (T08): ERROR only for critical errors
-#     2026.11.24 (ACGI) - Bodies sent through gHttpReqBody, not pBody: a static subset of more than
-#                         about 800 elements is longer than a process parameter allows, the PATCH
-#                         never ran (after the DELETE had emptied the target) and the earlier
-#                         HTTP 200 was reported as success. gHttpCode reset before each write.
 #EndRegion
 
 #Region --------------- Constants ---------------
@@ -28,7 +24,6 @@ cView = '%cProc%.%cUser%.%cTimestamp%.%cRandomInt%';
 cTemp = 1;
 NumericGlobalVariable('gHttpCode');
 StringGlobalVariable('gHttpBody');
-StringGlobalVariable('gHttpReqBody');
 StringGlobalVariable('gEnc');
 NumericGlobalVariable('gDeployOK');
 StringGlobalVariable('gDeployMsg');
@@ -160,19 +155,15 @@ WHILE(nPos > 0);
 			IF(sKind @= 'static');
 				ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'DELETE', 'pPath', sSubURL | '/Elements/$ref');
 			ENDIF;
-			gHttpReqBody = '{' | sCore | '}';
-			gHttpCode = 0;
-			ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'PATCH', 'pPath', sSubURL, 'pBody', '');
+			ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'PATCH', 'pPath', sSubURL, 'pBody', '{' | sCore | '}');
 			sAction = 'updated';
 		ELSE;
-			gHttpReqBody = '{"Name":"' | sSubJs | '",' | sCore | '}';
-			gHttpCode = 0;
-			ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'POST', 'pPath', sSubBase, 'pBody', '');
+			ExecuteProcess('}Sys.API.Request', 'pDB', pTargetDB, 'pMethod', 'POST', 'pPath', sSubBase, 'pBody', '{"Name":"' | sSubJs | '",' | sCore | '}');
 			sAction = 'created';
 		ENDIF;
 		ExecuteProcess(cLogProc, 'pFlag', 'MSG', 'pProc', cProc, 'pMSG', sSub | ': ' | sKind | ' ' | sAction | ' HTTP ' | NumberToString(gHttpCode));
 		IF(gHttpCode < 200 % gHttpCode > 299);
-			sFail = sFail | IF(sFail @= '', '', '; ') | sSub | ': HTTP ' | NumberToString(gHttpCode) | ' ' | SUBST(gHttpBody, 1, 500);
+			sFail = sFail | IF(sFail @= '', '', '; ') | sSub | ': HTTP ' | NumberToString(gHttpCode) | ' ' | gHttpBody;
 		ELSEIF(sAction @= 'created');
 			nNew = nNew + 1;
 		ELSE;

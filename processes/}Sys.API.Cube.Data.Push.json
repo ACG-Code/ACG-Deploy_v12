@@ -41,24 +41,6 @@
 			"Prompt":"Cells per REST call",
 			"Value":500,
 			"Type":"Numeric"
-		},
-		{
-			"Name":"pSliceDim",
-			"Prompt":"Slice: dimension to split (blank = whole cube)",
-			"Value":"",
-			"Type":"String"
-		},
-		{
-			"Name":"pSliceNo",
-			"Prompt":"Slice: this slice, 1..pSliceCount",
-			"Value":0,
-			"Type":"Numeric"
-		},
-		{
-			"Name":"pSliceCount",
-			"Prompt":"Slice: number of slices (every pSliceCount-th leaf of pSliceDim, starting at leaf pSliceNo)",
-			"Value":0,
-			"Type":"Numeric"
 		}
 	],
 	"Variables":
@@ -211,7 +193,6 @@
 			"EndByte":0
 		}
 	],
-	"UID": "17955341180002",
 	"UIData": "CubeAction=1511\fDataAction=1503\fCubeLogChanges=0\f",
 	"VariablesUIData": [
 		"VarType=32\fColType=827\f",
